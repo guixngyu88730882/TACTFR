@@ -34,6 +34,9 @@ namespace EF.PoliceMod
         private Ped _secondarySuspect;
         private Vector3 _secondaryLastKnownPos;
         private bool _secondaryLost = false;
+
+        // 5.4.0 Step1：统一案件嫌疑人数据（先服务于双人交付判定）
+        private readonly List<EF.PoliceMod.Core.CaseSuspect> _caseSuspects = new List<EF.PoliceMod.Core.CaseSuspect>(2);
         // 案件是否已处于活动中（对外暴露 HasActiveCase）
         private bool _caseActive = false;
         // 防止重复结算的标志（EndCase 会设置它）
@@ -396,11 +399,20 @@ namespace EF.PoliceMod
 
         private void OnSuspectDelivered(EF.PoliceMod.Core.SuspectDeliveredEvent e)
         {
-            // 双嫌疑人阶段A：如果还有第二名嫌疑人未处理，则先切换 primary，不结案
             try
             {
-                if (TrySwitchToNextPrimary("Delivered"))
+                MarkDelivered(e.SuspectHandle);
+
+                if (!AreAllCaseSuspectsDelivered())
+                {
+                    if (TrySwitchToNextPrimary("Delivered"))
+                    {
+                        try { EventBus.Publish(new EF.PoliceMod.Core.SuspectHandleListChangedEvent(_suspectHandles)); } catch { }
+                    }
+
+                    SmsNotification.Show("911调度", "交付进度", $"本案已交付 {GetDeliveredCount()}/{GetCaseSuspectCount()} 名嫌疑人，请继续押送剩余目标。");
                     return;
+                }
             }
             catch { }
 
@@ -424,7 +436,7 @@ namespace EF.PoliceMod
             try { PublishTerminalAccessIfChanged(); } catch { }
 
             try { PublishCaseStatusIfChanged(); } catch { }
-            ModLog.Info("[CaseManager] Suspect delivered -> awaiting manual terminal acceptance for next case");
+            ModLog.Info("[CaseManager] All suspects delivered -> awaiting manual terminal acceptance for next case");
             SmsNotification.Show("911调度", "~g~交付完成~s~", "嫌疑人已交付，请前往终端接收下一个警情（按 ~o~O~s~ 打开）");
             // 清空 pending（案件结束或已交付时）
             if (_pendingBoardedEvents.Count > 0)
@@ -433,6 +445,55 @@ namespace EF.PoliceMod
                 _pendingBoardedEvents.Clear();
             }
 
+        }
+
+        private int GetCaseSuspectCount()
+        {
+            try { return Math.Max(1, _caseSuspects.Count); } catch { return 1; }
+        }
+
+        private int GetDeliveredCount()
+        {
+            try
+            {
+                int c = 0;
+                foreach (var s in _caseSuspects)
+                {
+                    if (s != null && s.Status == EF.PoliceMod.Core.CaseSuspectStatus.Delivered) c++;
+                }
+                return c;
+            }
+            catch { return 0; }
+        }
+
+        private void MarkDelivered(int handle)
+        {
+            if (handle <= 0) return;
+            try
+            {
+                foreach (var s in _caseSuspects)
+                {
+                    if (s == null || s.Handle != handle) continue;
+                    s.Status = EF.PoliceMod.Core.CaseSuspectStatus.Delivered;
+                    ModLog.Info($"[CaseManager] MarkDelivered: handle={handle}, delivered={GetDeliveredCount()}/{GetCaseSuspectCount()}");
+                    return;
+                }
+            }
+            catch { }
+        }
+
+        private bool AreAllCaseSuspectsDelivered()
+        {
+            try
+            {
+                if (_caseSuspects == null || _caseSuspects.Count == 0) return false;
+                foreach (var s in _caseSuspects)
+                {
+                    if (s == null || s.Status != EF.PoliceMod.Core.CaseSuspectStatus.Delivered) return false;
+                }
+                return true;
+            }
+            catch { return false; }
         }
 
 
@@ -1285,6 +1346,7 @@ namespace EF.PoliceMod
                 _suspectHandles.Clear();
                 if (_suspect != null && _suspect.Exists()) _suspectHandles.Add(_suspect.Handle);
                 _primarySuspectIndex = 0;
+                RegisterCaseSuspect(_suspect, 0, true);
 
 
                 bool wantTwo = false;
@@ -1329,6 +1391,7 @@ namespace EF.PoliceMod
                         try { sc?.ApplyProfile(s2, profile); } catch { }
 
                         _suspectHandles.Add(s2.Handle);
+                        RegisterCaseSuspect(s2, 1, false);
                         _secondaryLastKnownPos = s2Pos;
                         _secondaryLost = false;
 
@@ -1622,6 +1685,7 @@ namespace EF.PoliceMod
 
                 // 提升为 primary
                 _primarySuspectIndex = 1;
+                PromotePrimaryHandle(nextHandle);
                 _suspect = nextPed;
                 _lastKnownSuspect = nextPed;
                 try { _lastKnownSuspectHandle = nextPed.Handle; } catch { }
@@ -1687,6 +1751,38 @@ namespace EF.PoliceMod
             }
         }
 
+        private void RegisterCaseSuspect(Ped ped, int slotIndex, bool isPrimary)
+        {
+            if (ped == null || !ped.Exists()) return;
+            try
+            {
+                _caseSuspects.RemoveAll(x => x == null || x.Handle == ped.Handle);
+                _caseSuspects.Add(new EF.PoliceMod.Core.CaseSuspect
+                {
+                    Handle = ped.Handle,
+                    SlotIndex = slotIndex,
+                    IsPrimary = isPrimary,
+                    Status = EF.PoliceMod.Core.CaseSuspectStatus.Active,
+                    LastKnownPos = ped.Position
+                });
+            }
+            catch { }
+        }
+
+        private void PromotePrimaryHandle(int handle)
+        {
+            if (handle <= 0) return;
+            try
+            {
+                foreach (var s in _caseSuspects)
+                {
+                    if (s == null) continue;
+                    s.IsPrimary = (s.Handle == handle);
+                }
+            }
+            catch { }
+        }
+
         private void CleanupCase()
         {
             EventBus.Publish(new CaseEndedEvent());
@@ -1731,6 +1827,7 @@ namespace EF.PoliceMod
             catch { }
 
             try { _suspectHandles.Clear(); } catch { }
+            try { _caseSuspects.Clear(); } catch { }
             _primarySuspectIndex = 0;
 
             _suspectBlip = null;
