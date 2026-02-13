@@ -1,0 +1,1724 @@
+using EF.PoliceMod;
+using EF.PoliceMod.Core;
+using EF.PoliceMod.Core.Contracts;
+using EF.PoliceMod.Core.Contracts.Snapshots;
+using GTA;
+using GTA.Math;
+using GTA.Native;
+using GTA.UI;
+using System.Collections.Generic;
+using System;
+using System.Linq;
+
+namespace EF.PoliceMod
+{
+    public partial class CaseManager : ICaseService, EF.PoliceMod.Core.ISuspectContext
+    {
+        // ===== 案件生命周期控制 =====
+
+        // 最大案件时长（毫秒），10 分钟（用在超时判定与评分）
+        private const int MaxCaseDurationMs = 10 * 60 * 1000;
+      
+        private Ped _suspect;
+        private Blip _suspectBlip;
+        private Blip _suspectSearchAreaBlip;
+        private Vector3 _suspectLastKnownPos;
+        private int _suspectLastKnownAtMs = 0;
+        private bool _suspectLost = false;
+        private int _suspectRecoverAtMs = 0;
+        // 双嫌疑人（阶段A）：先做“主嫌疑人驱动 + 副嫌疑人附件目标”
+        // 约定：现有单嫌疑人链路（SuspectController/LockTarget/押送/交付/逼停）只围绕 primary 工作
+        private readonly List<int> _suspectHandles = new List<int>(2);
+        private int _primarySuspectIndex = 0;
+        private Blip _secondarySuspectBlip;
+        private Ped _secondarySuspect;
+        private Vector3 _secondaryLastKnownPos;
+        private bool _secondaryLost = false;
+        // 案件是否已处于活动中（对外暴露 HasActiveCase）
+        private bool _caseActive = false;
+        // 防止重复结算的标志（EndCase 会设置它）
+        private bool _caseEnded = false;
+
+        // 标记：如果为 true，表示系统允许通过警用终端手动接警（StartCase）
+        // — StartDuty 会把它设为 true；交付后也会设为 true；开始案件后设为 false
+        private bool _readyForNewCase = false;
+        // 新增字段（类字段区）
+        private Blip _deliveryRouteBlip = null;
+        private int _lastRouteCreatedAt = 0;          // Game.GameTime ms
+        private int _lastRouteSuspectHandle = -1;
+        private readonly Vector3 _policeStationPos = new Vector3(443.5f, -981.0f, 30.7f); // 如果想改成终端位置，后面我教你
+                                                                                          // ---------- 挂起的 SuspectBoarded 事件队列（用于 case 尚未 active 时缓存） ----------
+        private readonly System.Collections.Generic.Queue<EF.PoliceMod.Core.SuspectBoardedVehicleEvent> _pendingBoardedEvents
+            = new System.Collections.Generic.Queue<EF.PoliceMod.Core.SuspectBoardedVehicleEvent>();
+
+        private bool _pendingSpawn = false;
+        private int _spawnDelayEndTime = 0;
+        private bool _isOnDuty = false;
+        private Ped _lastKnownSuspect;
+        private int _lastKnownSuspectHandle = -1;
+        private int _caseStartTime;
+        private bool _suspectWasResisting = false;
+
+        // --- “丢失”判定（距离版）：只保留“离得太远就丢失” ---
+        private const float LostIfFartherThan = 520f;
+        private const float RecoverIfCloserThan = 220f;
+
+
+        private enum CaseMode
+        {
+            OnFoot,
+            VehicleFlee
+        }
+
+        private CaseMode _caseMode = CaseMode.OnFoot;
+
+        // 当玩家通过通缉系统选中某个 ped 时，把 handle 存到这里，SpawnSuspect 会尝试使用这个 ped（优先）
+        private int _forcedSuspectHandle = -1;
+
+        // 对外公开的状态（其他模块用来判断能否打开终端）
+        // 只有在值勤 && 无进行中案件 && 系统处于“可接警”时，终端用于接警才可用
+        public bool HasActiveCase => _caseActive;
+        public bool CanAcceptNewCase => _isOnDuty && !_caseActive && _readyForNewCase;
+        public bool CanOpenTerminal => _isOnDuty && !_caseActive && _readyForNewCase;
+
+        private bool _initialized = false;
+
+        public void Initialize()
+        {
+            if (_initialized) return;
+            _initialized = true;
+            ModLog.Info("[CaseManager] Initialized");
+        }
+
+        public new void Tick()
+        {
+            OnTick();
+        }
+
+        public void Shutdown()
+        {
+            try { CleanupCase(); } catch { }
+            try { ClearDeliveryRoute(); } catch { }
+            _isOnDuty = false;
+            _caseActive = false;
+            _initialized = false;
+            ModLog.Info("[CaseManager] Shutdown");
+        }
+
+        public CaseSnapshot GetSnapshot()
+        {
+            return new CaseSnapshot(
+                _caseActive,
+                CurrentSuspectHandle,
+                _suspectLastKnownPos,
+                _suspectLost,
+                _caseStartTime,
+                _terminalStars
+            );
+        }
+
+        void ICaseService.StartCase()
+        {
+            StartCase();
+        }
+
+        void ICaseService.EndCase(CaseEndReason reason)
+        {
+            EndReason internalReason;
+            switch (reason)
+            {
+                case CaseEndReason.Completed:
+                    internalReason = EndReason.Completed;
+                    break;
+                case CaseEndReason.Failed:
+                    internalReason = EndReason.Failed;
+                    break;
+                case CaseEndReason.Cancelled:
+                    internalReason = EndReason.Cancelled;
+                    break;
+                case CaseEndReason.SuspectDead:
+                    internalReason = EndReason.SuspectDead;
+                    break;
+                case CaseEndReason.Timeout:
+                    internalReason = EndReason.Timeout;
+                    break;
+                case CaseEndReason.OffDuty:
+                    internalReason = EndReason.OffDuty;
+                    break;
+                default:
+                    internalReason = EndReason.Cancelled;
+                    break;
+            }
+            EndCase(internalReason);
+        }
+
+
+        // 终端访问权限（解耦 UI 与 CaseManager）：状态由本模块发布，UI 侧只读订阅
+        private bool _lastTerminalAccess = false;
+        private void PublishTerminalAccessIfChanged()
+        {
+            bool now = CanOpenTerminal;
+            if (now == _lastTerminalAccess) return;
+            _lastTerminalAccess = now;
+            try { EventBus.Publish(new TerminalAccessChangedEvent(now)); } catch { }
+        }
+
+
+        // 案件状态（供侦察/调度等系统订阅）：尽量只在变化时发布，减少事件噪音
+        private bool _lastCaseActive = false;
+        private bool _lastSuspectLost = false;
+        private int _lastCaseStartedAtMs = 0;
+        private bool _lastHeliReconUsed = false;
+        private int _lastCurrentSuspectHandle = -1;
+        private void PublishCaseStatusIfChanged()
+        {
+            bool active = HasActiveCase;
+            bool lost = IsSuspectLost;
+            int started = CaseStartedAtMs;
+            bool reconUsed = HeliReconUsed;
+            int h = CurrentSuspectHandle;
+
+            if (active == _lastCaseActive
+                && lost == _lastSuspectLost
+                && started == _lastCaseStartedAtMs
+                && reconUsed == _lastHeliReconUsed
+                && h == _lastCurrentSuspectHandle)
+                return;
+
+            _lastCaseActive = active;
+            _lastSuspectLost = lost;
+            _lastCaseStartedAtMs = started;
+            _lastHeliReconUsed = reconUsed;
+            _lastCurrentSuspectHandle = h;
+
+            ModLog.Info($"[CaseManager] Publishing CaseStatusChangedEvent: active={active}, lost={lost}, suspectHandle={h}");
+
+            try
+            {
+                EventBus.Publish(new CaseStatusChangedEvent(active, lost, started, reconUsed, h));
+            }
+            catch { }
+        }
+
+        // --- 低耦合：给 Input/调度/侦察系统使用的只读状态 ---
+        public bool IsOnDuty => _isOnDuty;
+        public int CaseStartedAtMs => _caseStartTime;
+        public bool IsSuspectLost => _suspectLost;
+        public Vector3 SuspectLastKnownPos => _suspectLastKnownPos;
+        public IReadOnlyList<int> SuspectHandles => _suspectHandles;
+        public int CurrentSuspectHandle
+        {
+            get
+            {
+                // 优先使用 primary handle（为双嫌疑人准备）
+                try
+                {
+                    if (_suspectHandles != null && _suspectHandles.Count > 0)
+                    {
+                        int idx = Math.Max(0, Math.Min(_suspectHandles.Count - 1, _primarySuspectIndex));
+                        int h = _suspectHandles[idx];
+                        if (h > 0) return h;
+                    }
+                }
+                catch { }
+
+                // 回退到旧逻辑
+                return (_lastKnownSuspect != null && _lastKnownSuspect.Exists()) ? _lastKnownSuspect.Handle : _lastKnownSuspectHandle;
+            }
+        }
+
+        // 本案侦察限制：每案一次
+        public bool HeliReconUsed => _heliReconUsed;
+        private bool _heliReconUsed = false;
+
+        public void MarkHeliReconUsed() { _heliReconUsed = true; try { PublishCaseStatusIfChanged(); } catch { } }
+
+        // ISuspectContext 回填：供 HeliReconSystem 等低耦合系统调用
+        // 现有实现已存在同名方法（若你后续做双嫌疑人，这里可按“主嫌疑人”更新）
+
+        // 供 PullOverSystem 等模块读取“本案嫌疑人”（避免必须先 L 锁定）
+        public Ped GetCurrentSuspectPed()
+        {
+            try
+            {
+                if (_suspect != null && _suspect.Exists()) return _suspect;
+            }
+            catch { }
+
+            try
+            {
+                if (_lastKnownSuspect != null && _lastKnownSuspect.Exists()) return _lastKnownSuspect;
+            }
+            catch { }
+
+            return null;
+        }
+
+        public bool TryGetLastKnownPos(int suspectHandle, out Vector3 pos)
+        {
+            pos = default(Vector3);
+            try
+            {
+                if (suspectHandle <= 0) return false;
+
+                // primary
+                if (_suspect != null && _suspect.Exists() && _suspect.Handle == suspectHandle)
+                {
+                    pos = _suspectLastKnownPos;
+                    return true;
+                }
+            }
+            catch { }
+
+            try
+            {
+                // secondary（阶段A 临时实现）
+                if (_suspectHandles.Count >= 2 && _suspectHandles[1] == suspectHandle)
+                {
+                    pos = _secondaryLastKnownPos;
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        public bool IsLost(int suspectHandle)
+        {
+            try
+            {
+                if (suspectHandle <= 0) return false;
+                if (_suspect != null && _suspect.Exists() && _suspect.Handle == suspectHandle) return _suspectLost;
+            }
+            catch { }
+
+            try
+            {
+                if (_suspectHandles.Count >= 2 && _suspectHandles[1] == suspectHandle) return _secondaryLost;
+            }
+            catch { }
+
+            return false;
+        }
+
+
+        public enum SuspectPersonality
+        {
+            Civilian,      // 普通嫌疑人
+            Nervous,       // 紧张型（可能逃跑）
+            Violent,       // 暴力型（高概率反抗）
+            ArmedManiac    // 武装暴徒（必带枪）
+        }
+        public class SuspectProfile
+        {
+            public SuspectPersonality Personality;
+            public float ResistChance;   // 0~1
+            public bool HasFirearm;
+            public string Briefing;      // 给玩家看的提示
+        }
+
+        private SuspectProfile GenerateSuspectProfile()
+        {
+            Random r = new Random(Game.GameTime);
+
+            int roll = r.Next(100);
+
+            if (roll < 10)
+            {
+                return new SuspectProfile
+                {
+                    Personality = SuspectPersonality.ArmedManiac,
+                    HasFirearm = true,
+                    ResistChance = 0.95f,
+                    Briefing = "【高危】武装暴徒，极可能持枪反抗"
+                };
+            }
+            else if (roll < 40)
+            {
+                return new SuspectProfile
+                {
+                    Personality = SuspectPersonality.Violent,
+                    HasFirearm = false,
+                    ResistChance = 0.6f,
+                    Briefing = "【中危】可能有暴力倾向，嫌疑人可能反抗"
+                };
+            }
+            else
+            {
+                return new SuspectProfile
+                {
+                    Personality = SuspectPersonality.Civilian,
+                    HasFirearm = false,
+                    ResistChance = 0.3f,
+                    Briefing = "【普通】一般嫌疑人，注意控制即可"
+                };
+            }
+        }
+
+
+
+        public enum EndReason
+        {
+            Completed,     // 任务完成
+            Failed,        // 任务失败
+            Cancelled,     // 任务被取消
+            SuspectDead,   // 嫌疑人死亡
+            Timeout,       // 超时
+            OffDuty        // 下班
+        }
+        private void EndCase(EndReason reason)
+        {
+            if (!_caseActive || _caseEnded)
+                return; // ★ 防止重复结算（极其重要）
+
+            _caseEnded = true;
+            _caseActive = false;
+
+            try { PublishTerminalAccessIfChanged(); } catch { }
+
+            try { PublishCaseStatusIfChanged(); } catch { }
+
+            int elapsedMs = Game.GameTime - _caseStartTime;
+
+            int score = CalculateScore(reason, elapsedMs);
+            ShowScore(reason, score, elapsedMs);
+
+            CleanupCase();
+            // 清空 pending（案件结束或已交付时）
+            if (_pendingBoardedEvents.Count > 0)
+            {
+                ModLog.Info("[CaseManager] Clearing " + _pendingBoardedEvents.Count + " pending boarded events due to case end");
+                _pendingBoardedEvents.Clear();
+            }
+
+        }
+
+        private void OnSuspectDelivered(EF.PoliceMod.Core.SuspectDeliveredEvent e)
+        {
+            // 双嫌疑人阶段A：如果还有第二名嫌疑人未处理，则先切换 primary，不结案
+            try
+            {
+                if (TrySwitchToNextPrimary("Delivered"))
+                    return;
+            }
+            catch { }
+
+            EndCase(EndReason.Completed);
+            ClearDeliveryRoute();
+            // 取消并删除路由 blip（如果存在）
+            if (_deliveryRouteBlip != null)
+            {
+                try
+                {
+                    _deliveryRouteBlip.ShowRoute = false;
+                    _deliveryRouteBlip.Delete();
+                }
+                catch { }
+                _deliveryRouteBlip = null;
+            }
+
+            // 交付后不自动生成新案件，需要玩家手动去终端接警
+            _readyForNewCase = true;
+
+            try { PublishTerminalAccessIfChanged(); } catch { }
+
+            try { PublishCaseStatusIfChanged(); } catch { }
+            ModLog.Info("[CaseManager] Suspect delivered -> awaiting manual terminal acceptance for next case");
+            SmsNotification.Show("911调度", "~g~交付完成~s~", "嫌疑人已交付，请前往终端接收下一个警情（按 ~o~O~s~ 打开）");
+            // 清空 pending（案件结束或已交付时）
+            if (_pendingBoardedEvents.Count > 0)
+            {
+                ModLog.Info("[CaseManager] Clearing " + _pendingBoardedEvents.Count + " pending boarded events due to case end");
+                _pendingBoardedEvents.Clear();
+            }
+
+        }
+
+
+        public void StartCase()
+        {
+            if (!_isOnDuty || _caseActive)
+                return;
+
+            _readyForNewCase = false;
+
+            try { PublishTerminalAccessIfChanged(); } catch { }
+
+            _suspectWasResisting = false;
+            _caseActive = true;
+            _caseEnded = false;
+            _caseStartTime = Game.GameTime;
+            _heliReconUsed = false;
+
+            try { PublishCaseStatusIfChanged(); } catch { }
+
+            // ★ 生成嫌疑人性格（只生成一次）
+            SuspectProfile profile;
+            if (_useTerminalPreset)
+            {
+                // 终端接警：星级决定风险档位（1~2 普通；3~4 中危；5 高危）
+                if (_terminalStars >= 5)
+                {
+                    profile = new SuspectProfile
+                    {
+                        Personality = SuspectPersonality.ArmedManiac,
+                        HasFirearm = true,
+                        ResistChance = 0.95f,
+                        Briefing = "~r~【高危】~s~武装暴徒，极可能持枪反抗"
+                    };
+                }
+                else if (_terminalStars >= 3)
+                {
+                    profile = new SuspectProfile
+                    {
+                        Personality = SuspectPersonality.Violent,
+                        HasFirearm = false,
+                        ResistChance = 0.6f,
+                        Briefing = "~o~【中危】~s~可能有暴力倾向，嫌疑人可能反抗"
+                    };
+                }
+                else
+                {
+                    profile = new SuspectProfile
+                    {
+                        Personality = SuspectPersonality.Civilian,
+                        HasFirearm = false,
+                        ResistChance = 0.3f,
+                        Briefing = "~g~【普通】~s~一般嫌疑人，注意控制即可"
+                    };
+                }
+            }
+            else
+            {
+                profile = GenerateSuspectProfile();
+            }
+
+            if (_caseMode == CaseMode.VehicleFlee)
+            {
+                profile.Briefing = profile.Briefing + "  ~b~嫌疑人正在驾车逃逸~s~（按 ~y~I~s~ 逼停，停稳后按 ~y~U~s~ 要求下车；下车后可直接按 ~y~E~s~ 押送上车）";
+            }
+
+            SmsNotification.Show("911调度", "新的警情", profile.Briefing);
+
+            // 用完即清：下一次案件（例如嫌疑人死亡自动再派发）仍走随机逻辑
+            _useTerminalPreset = false;
+            _terminalOptionId = -1;
+            _terminalStars = 0;
+            _forceDualSuspects = false;
+            // 例：StartCase() 中把案件标记为 active 的那段后面加：
+            if (_pendingBoardedEvents.Count > 0)
+            {
+                ModLog.Info("[CaseManager] Processing " + _pendingBoardedEvents.Count + " pending SuspectBoarded events now that case is active");
+                while (_pendingBoardedEvents.Count > 0)
+                {
+                    var pending = _pendingBoardedEvents.Dequeue();
+                    ProcessSuspectBoardedEvent(pending);
+                }
+            }
+
+            SpawnSuspect(profile);
+        }
+
+        public void StartDuty()
+        {
+            _isOnDuty = true;
+            _pendingSpawn = false;
+            _readyForNewCase = true; // 上班后由玩家去终端接警
+
+            try { PublishTerminalAccessIfChanged(); } catch { }
+
+            try { PublishCaseStatusIfChanged(); } catch { }
+            SmsNotification.Show("911调度", "~g~已开始执勤~s~", "请前往警局终端接警（按 ~o~O~s~ 打开）");
+            ModLog.Info("[CaseManager] StartDuty -> on duty. Waiting for terminal acceptance.");
+            // 不自动 StartCase() —— 玩家需要到终端按 5 接警
+        }
+
+
+
+        private int CalculateScore(EndReason reason, int elapsedMs)
+        {
+            if (elapsedMs > MaxCaseDurationMs)
+                return 0;
+            int baseScore = 0;
+
+            switch (reason)
+            {
+                case EndReason.Completed:
+                    baseScore = 10;   // ⭐ 成功交付是满分基准
+                    break;
+
+                case EndReason.SuspectDead:
+                    if (_suspectWasResisting)
+                        baseScore = 8;    // 合法击毙，低于活捉
+                    else
+                        baseScore = 2;    // 非授权击毙
+                    break;
+
+                case EndReason.Failed:
+                case EndReason.Timeout:
+                case EndReason.Cancelled:
+                    baseScore = 0;
+                    break;
+            }
+
+            float timeFactor = 1f - (float)elapsedMs / MaxCaseDurationMs;
+            if (timeFactor < 0.2f)
+                timeFactor = 0.2f;
+
+            return (int)(baseScore * timeFactor);
+        }
+        private void ShowScore(EndReason reason, int score, int elapsedMs)
+        {
+            int seconds = elapsedMs / 1000;
+            string reasonText = "任务结束";
+
+            switch (reason)
+            {
+                case EndReason.Completed:
+                    reasonText = "成功交付";
+                    break;
+                case EndReason.SuspectDead:
+                    reasonText = "嫌疑人死亡";
+                    break;
+                case EndReason.Timeout:
+                    reasonText = "任务超时";
+                    break;
+            }
+
+            Notification.Show(
+                "~y~案件结束：" + reasonText + "\n" +
+                "~w~用时：" + seconds + " 秒\n" +
+                "~g~评分：" + score + " / 10"
+            );
+        }
+        public void OnDutyStarted(DutyStartedEvent e)
+        {
+            StartDuty();
+        }
+
+        public void OnDutyEnded(DutyEndedEvent e)
+        {
+            _isOnDuty = false;
+            _pendingSpawn = false;
+
+            try { PublishTerminalAccessIfChanged(); } catch { }
+
+            // 下班未交付：必须清除导航/路线
+            try { ClearDeliveryRoute(); } catch { }
+
+            CleanupCase();
+            _suspectWasResisting = false;
+
+        }
+
+
+        private void OnSuspectDead(SuspectDeadEvent e)
+        {
+            ModLog.Info("[CaseManager] SuspectDeadEvent received");
+
+            // 双嫌疑人阶段A：如果还有第二名嫌疑人未处理，则先切换 primary，不触发新案
+            try
+            {
+                if (TrySwitchToNextPrimary("Dead"))
+                {
+                    SmsNotification.Show("911调度", "更新", "主嫌疑人已处理，已切换到另一名嫌疑人。");
+                    return;
+                }
+            }
+            catch { }
+
+            // 优先做视觉与导航清理
+            try
+            {
+                if (_lastKnownSuspect != null && _lastKnownSuspect.Exists())
+                {
+                    // 强制 ragdoll，防止动画复活（短时间）
+                    try
+                    {
+                        Function.Call(Hash.SET_PED_TO_RAGDOLL, _lastKnownSuspect.Handle, 5000, 5000, 0, false, false, false);
+                    }
+                    catch { }
+
+                    // 冻结位置以便过渡动画更平滑
+                    try
+                    {
+                        Function.Call(Hash.FREEZE_ENTITY_POSITION, _lastKnownSuspect.Handle, true);
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("[CaseManager] Error during ragdoll/freeze: " + ex);
+            }
+
+            // 取消并删除导航（如果存在）
+            try
+            {
+                ClearDeliveryRoute();
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("[CaseManager] ClearDeliveryRoute error: " + ex);
+            }
+
+            // 罚款逻辑：如果事件里能表明“是被玩家杀死”并且嫌疑人之前为合规态，则罚款（尝试反射/回退）
+            try
+            {
+                bool byPlayer = false;
+                bool wasCompliant = false;
+
+                // 1) 先尝试从事件本身读取信息（如果事件类型包含）
+                try
+                {
+                    var killerProp = e.GetType().GetProperty("KillerHandle")
+;
+                    if (killerProp != null)
+                    {
+                        var val = killerProp.GetValue(e);
+                        if (val is int && (int)val == Game.Player.Character.Handle) byPlayer = true;
+                    }
+                }
+                catch { }
+
+                try
+                {
+                    var compProp = e.GetType().GetProperty("KillerHandle")
+;
+                    if (compProp != null)
+                    {
+                        var val = compProp.GetValue(e);
+                        if (val is bool && (bool)val) wasCompliant = true;
+                    }
+                }
+                catch { }
+
+                // 2) 回退：若事件没有相关字段，用 CaseManager 的记录或 SuspectController 状态去判断
+                if (!wasCompliant)
+                {
+                    try
+                    {
+                        var sc = EFCore.Instance?.GetSuspectController();
+                        if (sc != null)
+                        {
+                            // 尝试用 last known suspect 的状态判断（如果实现了）
+                            var prop = sc.GetType().GetProperty("IsCompliant");
+                            if (prop != null)
+                            {
+                                // 这里取当前 controller 的合规状态（注意：需要 controller 针对当前嫌疑人返回真实值）
+                                var val = prop.GetValue(sc);
+                                if (val is bool && (bool)val) wasCompliant = true;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                // 3) 检查是否为玩家所杀（若无法判断为玩家，则 byPlayer 留为 false）
+                if (!byPlayer)
+                {
+                    try
+                    {
+                        // 有些事件会携带 KillerHandle 或者 KillerPed，可再尝试别名
+                        var killerProp2 = e.GetType().GetProperty("KillerHandle");
+                        if (killerProp2 != null)
+                        {
+                            var v = killerProp2.GetValue(e);
+                            if (v is Ped && ((Ped)v).Handle == Game.Player.Character.Handle) byPlayer = true;
+                        }
+                    }
+                    catch { }
+                }
+
+                if (byPlayer && wasCompliant)
+                {
+                    try
+                    {
+                        try
+                        {
+                            int money = Function.Call<int>(Hash.STAT_GET_INT, Game.GenerateHash("MP0_WALLET_BALANCE"));
+                            Function.Call(Hash.STAT_SET_INT, Game.GenerateHash("MP0_WALLET_BALANCE"), money - 10000, true);
+                        }
+                        catch { }
+
+                        Notification.Show("因误杀合规嫌疑人，已被罚款 $10,000");
+                        ModLog.Info("[CaseManager] Player fined 10000 for killing compliant suspect");
+                    }
+                    catch (Exception ex)
+                    {
+                        ModLog.Error("[CaseManager] Failed to apply fine: " + ex);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("[CaseManager] Error evaluating fine on suspect death: " + ex);
+            }
+
+            // 结束案件（以 SuspectDead 原因）
+            try
+            {
+                EndCase(EndReason.SuspectDead);
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("[CaseManager] EndCase error after suspect dead: " + ex);
+            }
+
+            // 更有感觉的玩家提示：先告诉玩家我们正在自动搜索/生成下一案
+            SmsNotification.Show("911调度", "嫌疑人已死亡", "正在重新派发警情...");
+            ModLog.Info("[CaseManager] Suspect dead -> scheduling automatic new case in ~2s");
+
+            // 自动触发下一案（延迟 ~2000ms）
+            _pendingSpawn = true;
+            _spawnDelayEndTime = Game.GameTime + 2000;
+        }
+
+        public void OnTick()
+        {
+            Ped player = Game.Player.Character;
+
+            // ===== 1️⃣ 玩家死亡 → 案件失败 =====
+            if (_isOnDuty && _caseActive && (!player.Exists() || player.IsDead))
+            {
+              
+                EndCase(EndReason.Failed);
+                return;
+            }
+
+            // ===== 2️⃣ 案件超时 → Timeout（⭐你加的逻辑，位置修正）=====
+            if (_isOnDuty && _caseActive)
+            {
+                int elapsed = Game.GameTime - _caseStartTime;
+                if (elapsed > MaxCaseDurationMs)
+                {
+                
+                    EndCase(EndReason.Timeout);
+                    return;
+                }
+            }
+
+            // ===== 3️⃣ 嫌疑人死亡/消失兜底 =====
+            if (_isOnDuty && _caseActive && _lastKnownSuspect != null)
+            {
+                // 0) 正常存在：持续刷新“最后已知位置”；并基于【未锁定时长】/【距离】判定是否进入“丢失”
+                if (_lastKnownSuspect.Exists() && !_lastKnownSuspect.IsDead)
+                {
+                    int now = Game.GameTime;
+
+                    try { _suspectLastKnownPos = _lastKnownSuspect.Position; } catch { }
+                    _suspectLastKnownAtMs = now;
+                    try { _lastKnownSuspectHandle = _lastKnownSuspect.Handle; } catch { }
+
+
+
+                    float dist = 99999f;
+                    try { dist = player.Position.DistanceTo(_suspectLastKnownPos); } catch { dist = 99999f; }
+
+                    bool shouldLose = false;
+                    if (dist >= LostIfFartherThan && now > _suspectRecoverAtMs) shouldLose = true;
+
+                    if (!_suspectLost && shouldLose)
+                    {
+                        TryEnterSuspectLostState();
+                    }
+
+                    if (_suspectLost && dist <= RecoverIfCloserThan)
+                    {
+                        _suspectRecoverAtMs = now + 5000;
+                        try { MarkSuspectFound(_lastKnownSuspect, _suspectLastKnownPos); } catch { }
+                        SmsNotification.Show("911调度", "目标已重新发现", "已恢复嫌疑人精确标记（红点）。");
+                    }
+                }
+
+                // 1) 真死亡：按原逻辑结案
+                if (_lastKnownSuspect.Exists() && _lastKnownSuspect.IsDead)
+                {
+                    int handle = _lastKnownSuspect.Handle;
+                    OnSuspectDead(new SuspectDeadEvent(handle));
+                    return;
+                }
+
+                // 2) 消失（被流式卸载/距离太远刷没）：进入“最后已知位置”搜索圈，不直接判死
+                if (!_lastKnownSuspect.Exists())
+                {
+                    // 兜底：记录最后一次能读到的位置
+                    _suspectLastKnownAtMs = Game.GameTime;
+
+                    TryEnterSuspectLostState();
+                    return;
+                }
+            }
+
+            // ===== 3.5️⃣ 副嫌疑人（阶段A）tick：刷新最后位置/简单丢失恢复 =====
+            try { TickSecondarySuspect(); } catch { }
+
+
+            // ===== 4️⃣ 延迟生成新案件 =====
+            if (_isOnDuty && _pendingSpawn && Game.GameTime >= _spawnDelayEndTime)
+            {
+                ModLog.Info("[CaseManager] Auto-starting new case (pendingSpawn triggered)");
+                _pendingSpawn = false;
+                StartCase();     // ✅【唯一正确入口】
+
+            }
+        }
+        // 终端接警参数（只对"本次 StartCase"生效，用完即清）
+        private bool _useTerminalPreset = false;
+        private int _terminalOptionId = -1;
+        private int _terminalStars = 0;
+        private bool _forceDualSuspects = false;
+
+        public CaseManager()
+        {
+            EventBus.Subscribe<EF.PoliceMod.Core.SuspectDeliveredEvent>(OnSuspectDelivered);
+            EventBus.Subscribe<SuspectDeadEvent>(OnSuspectDead);
+            EventBus.Subscribe<SuspectResistingEvent>(_ =>
+            {
+                _suspectWasResisting = true;
+            });
+
+            // ★ 执勤生命周期事件
+            EventBus.Subscribe<DutyStartedEvent>(OnDutyStarted);
+            EventBus.Subscribe<DutyEndedEvent>(OnDutyEnded);
+            EventBus.Subscribe<EF.PoliceMod.Core.SuspectBoardedVehicleEvent>(OnSuspectBoarded);
+            EventBus.Subscribe<EF.PoliceMod.Core.WantedTargetSelectedEvent>(OnWantedSelected);
+            EventBus.Subscribe<EF.PoliceMod.Core.TerminalCaseSelectedEvent>(OnTerminalCaseSelected);
+        }
+        private void OnTerminalCaseSelected(EF.PoliceMod.Core.TerminalCaseSelectedEvent e)
+        {
+            if (!_isOnDuty || _caseActive) return;
+
+            int optionId = e.OptionId;
+            int stars = e.Stars;
+
+            bool forceDualSuspects = false;
+
+            if (optionId >= 10 && optionId <= 15)
+            {
+                forceDualSuspects = true;
+                optionId = optionId - 10;
+                ModLog.Info($"[CaseManager] Dual suspect case selected, base optionId={optionId}");
+            }
+
+            if (optionId < 0 || optionId > 5)
+                return;
+
+            _caseMode = (optionId >= 3) ? CaseMode.VehicleFlee : CaseMode.OnFoot;
+            _forcedSuspectHandle = -1;
+
+            _useTerminalPreset = true;
+            _terminalOptionId = optionId;
+            _terminalStars = Math.Max(1, Math.Min(5, stars));
+            _forceDualSuspects = forceDualSuspects;
+
+            if (forceDualSuspects)
+            {
+                _terminalStars = Math.Max(4, _terminalStars);
+            }
+
+            ModLog.Info($"[CaseManager] Terminal preset applied: optionId={_terminalOptionId}, stars={_terminalStars}, forceDual={_forceDualSuspects}");
+
+
+            StartCase();
+
+        }
+
+        private void OnWantedSelected(EF.PoliceMod.Core.WantedTargetSelectedEvent e)
+        {
+            if (!_isOnDuty || _caseActive) return;
+
+            int requested = e.PedHandle;
+            int resolvedHandle = -1;
+
+            if (requested > 0)
+            {
+                try
+                {
+                    // 在世界里查找对应 handle，且必须不是玩家
+                    var found = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == requested && p.Handle != Game.Player.Handle);
+                    if (found != null && found.Exists())
+                    {
+                        resolvedHandle = found.Handle;
+                        ModLog.Info($"[CaseManager] OnWantedSelected -> resolved existing ped handle={resolvedHandle}");
+                    }
+                    else
+                    {
+                        ModLog.Warn($"[CaseManager] OnWantedSelected -> requested handle {requested} invalid or refers to player; will spawn new suspect");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ModLog.Error("[CaseManager] OnWantedSelected resolve error: " + ex);
+                }
+            }
+            else
+            {
+                ModLog.Info("[CaseManager] OnWantedSelected -> no existing ped requested, will spawn new suspect");
+            }
+
+            _forcedSuspectHandle = resolvedHandle; // -1 表示随机生成
+            StartCase();
+        }
+
+        private void OnSuspectBoarded(EF.PoliceMod.Core.SuspectBoardedVehicleEvent e)
+        {
+            try
+            {
+                int suspectHandle = e.SuspectHandle;
+                Ped suspect = null;
+                if (suspectHandle > 0)
+                {
+                    try
+                    {
+       
+                        try
+                        {
+                            var found = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == suspectHandle);
+                            if (found != null && found.Exists()) suspect = found;
+                            else suspect = null;
+                        }
+                        catch
+                        {
+                            suspect = null;
+                        }
+
+                    }
+                    catch { suspect = null; }
+                }
+
+                // 删除旧 blip
+                if (_deliveryRouteBlip != null)
+                {
+                    try { _deliveryRouteBlip.ShowRoute = false; _deliveryRouteBlip.Delete(); } catch { }
+                    _deliveryRouteBlip = null;
+                }
+
+                // 创建新 blip 并尝试显示路线
+                _deliveryRouteBlip = World.CreateBlip(_policeStationPos);
+                _deliveryRouteBlip.Sprite = BlipSprite.PoliceStation;
+                _deliveryRouteBlip.Color = BlipColor.Blue;
+                _deliveryRouteBlip.IsShortRange = false;
+                _deliveryRouteBlip.Name = "交付地点：警局";
+
+                bool routeSet = false;
+                try
+                {
+                    _deliveryRouteBlip.ShowRoute = true;
+                    routeSet = true;
+                }
+                catch { }
+
+                // 兜底 waypoint
+                try
+                {
+                    Function.Call(Hash.SET_NEW_WAYPOINT, _policeStationPos.X, _policeStationPos.Y);
+                }
+                catch { }
+
+                _lastRouteCreatedAt = Game.GameTime;
+                _lastRouteSuspectHandle = suspectHandle;
+
+                SmsNotification.Show("911调度", "押送指令", "嫌疑人已上车，导航已设置：返回警局交付");
+                ModLog.Info("[CaseManager] Delivery route set (suspect=" + suspectHandle + ")");
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("[CaseManager] OnSuspectBoarded error: " + ex);
+            }
+        }
+
+
+        // 生成/复用后先做一次“外观/任务/手铐状态净身”，避免继承旧 ped 的姿态（被拷、跟随等）。
+
+        // 这是针对你反馈的：交付结束后，下一个嫌疑人未接触就背手被拷并跟随的问题。
+        private void ResetSuspectVisualState(Ped suspect)
+        {
+            if (suspect == null || !suspect.Exists()) return;
+            if (suspect.IsDead) return;
+
+            try { Function.Call(Hash.CLEAR_PED_TASKS_IMMEDIATELY, suspect.Handle); } catch { }
+            try { Function.Call(Hash.CLEAR_PED_SECONDARY_TASK, suspect.Handle); } catch { }
+            try { Function.Call(Hash.CLEAR_PED_TASKS, suspect.Handle); } catch { }
+
+            // 解除手铐/绑腿（新案嫌疑人不应默认被拷）
+            try { Function.Call(Hash.SET_ENABLE_HANDCUFFS, suspect.Handle, false); } catch { }
+            try { Function.Call(Hash.SET_ENABLE_BOUND_ANKLES, suspect.Handle, false); } catch { }
+
+            // 清理姿态/步态
+            try { Function.Call(Hash.RESET_PED_MOVEMENT_CLIPSET, suspect.Handle, 0.25f); } catch { }
+            try { Function.Call(Hash.RESET_PED_STRAFE_CLIPSET, suspect.Handle); } catch { }
+            try { Function.Call(Hash.CLEAR_PED_SECONDARY_TASK, suspect.Handle); } catch { }
+
+            // 确保是“可控实体”
+            try { Function.Call(Hash.FREEZE_ENTITY_POSITION, suspect.Handle, false); } catch { }
+            try { Function.Call(Hash.SET_ENTITY_COLLISION, suspect.Handle, true, true); } catch { }
+        }
+
+
+        // 取消导航（公用）
+        private void ClearDeliveryRoute()
+        {
+            // 删除 route blip
+            if (_deliveryRouteBlip != null)
+            {
+                try { _deliveryRouteBlip.ShowRoute = false; _deliveryRouteBlip.Delete(); } catch { }
+                _deliveryRouteBlip = null;
+            }
+
+            // 清除 waypoint（导航残留的根源）
+            try { Function.Call(Hash.SET_WAYPOINT_OFF); } catch { }
+            try { Function.Call(Hash.CLEAR_GPS_PLAYER_WAYPOINT); } catch { }
+        }
+        // 处理实际的 boarded 事件（创建路由，兜底 waypoint，防抖已在 OnSuspectBoarded 中处理）
+        private void ProcessSuspectBoardedEvent(EF.PoliceMod.Core.SuspectBoardedVehicleEvent e)
+        {
+            try
+            {
+                int now = Game.GameTime;
+                int suspectHandle = (e.SuspectHandle > 0) ? e.SuspectHandle : -1;
+
+                // （如果你后面还需要 Ped 实例，可按需解析：）
+                // Ped suspect = null;
+                // if (suspectHandle > 0) {
+                //     try {
+                //         suspect = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == suspectHandle);
+                //     } catch { suspect = null; }
+                // }
+
+
+                // 删除旧 blip（如果有）
+                if (_deliveryRouteBlip != null)
+                {
+                    try { _deliveryRouteBlip.ShowRoute = false; _deliveryRouteBlip.Delete(); } catch { }
+                    _deliveryRouteBlip = null;
+                }
+
+                ModLog.Info("[CaseManager] Processing SuspectBoarded -> creating delivery route to station (suspect=" + suspectHandle + ")");
+
+                // 创建目标 blip
+                _deliveryRouteBlip = World.CreateBlip(_policeStationPos);
+                _deliveryRouteBlip.Sprite = BlipSprite.PoliceStation;
+                _deliveryRouteBlip.Color = BlipColor.Blue;
+                _deliveryRouteBlip.IsShortRange = false;
+                _deliveryRouteBlip.Name = "交付地点：警局";
+
+                bool routeSet = false;
+                try
+                {
+                    _deliveryRouteBlip.ShowRoute = true;
+                    routeSet = true;
+                    ModLog.Info("[CaseManager] Delivery blip created and ShowRoute=true");
+                }
+                catch (Exception ex)
+                {
+                    ModLog.Warn("[CaseManager] ShowRoute failed: " + ex);
+                }
+
+                // 兜底 waypoint
+                try
+                {
+                    Function.Call(Hash.SET_NEW_WAYPOINT, _policeStationPos.X, _policeStationPos.Y);
+                    if (!routeSet) ModLog.Info("[CaseManager] Fallback: SET_NEW_WAYPOINT called");
+                }
+                catch (Exception ex)
+                {
+                    ModLog.Warn("[CaseManager] SET_NEW_WAYPOINT failed: " + ex);
+                }
+
+                // 记录时间/handle（如果你有防抖字段）
+                _lastRouteCreatedAt = Game.GameTime;
+                _lastRouteSuspectHandle = suspectHandle;
+
+                SmsNotification.Show("911调度", "押送指令", "嫌疑人已上车，导航已设置：返回警局交付");
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("[CaseManager] ProcessSuspectBoardedEvent error: " + ex);
+            }
+        }
+
+        private void SpawnSuspect(SuspectProfile profile)
+        {
+            Ped player = Game.Player.Character;
+            if (!player.Exists())
+                return;
+
+
+            // 终端预设只对本次 StartCase 生效：确保 SpawnSuspect 使用的是最新选择，而不是被后续代码误清
+            ModLog.Info($"[CaseManager] SpawnSuspect enter: useTerminal={_useTerminalPreset}, optionId={_terminalOptionId}, stars={_terminalStars}, forceDual={_forceDualSuspects}");
+
+
+
+            // 1️⃣ 找生成点
+            Vector3 spawnSeed = player.Position;
+            if (_terminalOptionId >= 0 && _terminalOptionId <= 5)
+            {
+                // 终端地点预设：市区/郊区/偏远（按 optionId 0..2 / 3..5）
+                int region = (_terminalOptionId % 3);
+                if (region == 0) spawnSeed = new Vector3(215.8f, -810.2f, 30.7f);           // 市区（靠近市中心/停车场）
+                else if (region == 1) spawnSeed = new Vector3(-1034.6f, -2733.6f, 20.1f);  // 郊区（机场周边）
+                else spawnSeed = new Vector3(1692.2f, 4782.6f, 41.9f);                      // 偏远（北部小镇）
+            }
+
+            // 终端“偏远/郊区/市区”生成距离：把嫌疑人刷远一点，避免太近无聊
+            float spawnRadius = 520f;
+            try
+            {
+                int region = (_terminalOptionId >= 0 && _terminalOptionId <= 5) ? (_terminalOptionId % 3) : 0;
+                if (region == 0) spawnRadius = 320f;      // 市区
+                else if (region == 1) spawnRadius = 650f; // 郊区
+                else spawnRadius = 980f;                  // 偏远
+            }
+            catch { spawnRadius = 520f; }
+
+            Vector3 spawnPos = World.GetNextPositionOnStreet(
+                spawnSeed.Around(spawnRadius)
+            );
+
+            // 尝试使用玩家通过终端选中的 ped（如果有且有效），否则创建随机 Ped
+            if (_forcedSuspectHandle > 0)
+            {
+                try
+                {
+                    var found = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == _forcedSuspectHandle);
+                    if (found != null && found.Exists())
+                    {
+                        if (found.Handle == Game.Player.Handle)
+                        {
+                            ModLog.Warn("[CaseManager] SpawnSuspect - resolved ped is the player! Ignoring and spawning new suspect.");
+                        }
+                        else
+                        {
+                            _suspect = found;
+                            ModLog.Info("[CaseManager] SpawnSuspect - using existing ped handle=" + _suspect.Handle);
+                        }
+                    }
+                    else
+                    {
+                        ModLog.Info("[CaseManager] SpawnSuspect - forced handle not found in world, spawning new ped");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ModLog.Error("[CaseManager] SpawnSuspect - resolving forced handle error: " + ex);
+                }
+            }
+
+            // 回退：找不到就随机生成
+            if (_suspect == null || !_suspect.Exists())
+            {
+                _suspect = World.CreateRandomPed(spawnPos);
+                ModLog.Info("[CaseManager] SpawnSuspect - CreatedRandomPed -> handle=" + (_suspect?.Handle.ToString() ?? "null"));
+            }
+
+            if (_suspect == null || !_suspect.Exists())
+                return;
+
+            // ✅ 终端预设需要贯穿本次 SpawnSuspect；如果被外部逻辑误清，这里直接强制恢复
+            // 目标：终端选了双人（optionId 10~15）必须稳定出第二嫌疑人
+            if (_terminalStars <= 0) _terminalStars = 1;
+            if (_terminalOptionId < 0) _terminalOptionId = 0;
+            // 终端双人模板兜底：万一 forceDual 被误清（你日志里就是这种“被清空”现象），这里强制恢复
+            // 规则：终端双人模板 optionId=10..15 会在 OnTerminalCaseSelected 映射回 0..5，
+            // 所以这里用“stars>=4 且来自终端预设”作为兜底双人开关（可验收优先）。
+            if (_useTerminalPreset && _terminalStars >= 4)
+                _forceDualSuspects = true;
+
+
+
+            EntityTracker.Instance.Register(_suspect, "case_suspect", "CaseManager");
+
+
+            // 清空强制句柄（只用一次）
+            _forcedSuspectHandle = -1;
+
+            // 生成/复用后先做一次“外观状态重置”，避免继承旧的手铐/步态/动画。
+            try { ResetSuspectVisualState(_suspect); } catch { }
+
+            // 3️⃣ 应用性格（唯一入口）
+            ModLog.Info($"[CaseManager] SpawnSuspect -> profile: Personality={profile.Personality}, HasFirearm={profile.HasFirearm}, ResistChance={profile.ResistChance}");
+            var sc = EFCore.Instance
+             .GetSuspectController();
+            sc?.ApplyProfile(_suspect, profile);
+
+            // ★ 同步当前嫌疑人：用于 PullOverSystem（I 逼停）等系统不必先 L 锁定
+            try { sc?.TakeControl(_suspect); } catch { }
+
+            // 4️⃣ 注册给锁定系统
+            EFCore.Instance.LockTargetSystem.RegisterSuspect(_suspect);
+
+            // 双嫌疑人模式下：避免 “嫌疑人(2)” 没上图。这里补一条日志，方便你看 EF_PoliceMod.log 是否真的走到 wantTwo=true 分支。
+            try { ModLog.Info($"[CaseManager] After primary RegisterSuspect: handlesCount={_suspectHandles.Count}, forceDual={_forceDualSuspects}, stars={_terminalStars}, useTerminal={_useTerminalPreset}"); } catch { }
+
+                // 如果终端明确选了双人模板，但字段被意外清空，则以 optionId 范围兜底强制双人
+                try
+                {
+                    if (_terminalOptionId >= 0 && _terminalOptionId <= 5 && _forceDualSuspects == false)
+                    {
+                        // no-op
+                    }
+                }
+                catch { }
+
+
+
+                // 如果终端明确选了双人模板，但字段被意外清空，则以 optionId 范围兜底强制双人
+                try
+                {
+                    if (_terminalOptionId >= 0 && _terminalOptionId <= 5 && _forceDualSuspects == false)
+                    {
+                        // no-op
+                    }
+                }
+                catch { }
+
+
+
+
+            // ===== 双嫌疑人（阶段A）：按终端星级概率生成第二名嫌疑人 =====
+            // 规则：stars>=4 有概率双人；stars>=5 必定双人；双人案件选项强制双人
+            ModLog.Info($"[CaseManager] Dual suspect check: _useTerminalPreset={_useTerminalPreset}, _terminalStars={_terminalStars}");
+            try
+            {
+                _suspectHandles.Clear();
+                if (_suspect != null && _suspect.Exists()) _suspectHandles.Add(_suspect.Handle);
+                _primarySuspectIndex = 0;
+
+
+                bool wantTwo = false;
+                // 终端双人模板：强制双人（稳定、可验收）
+                if (_forceDualSuspects)
+                {
+                    wantTwo = true;
+                }
+                // 非双人模板：仍保留“高星概率双人”
+                else if (_useTerminalPreset)
+                {
+                    if (_terminalStars >= 5) wantTwo = true;
+                    else if (_terminalStars >= 4) wantTwo = true; // 原先 50% 改为必出，便于测试/体验
+                }
+
+
+                ModLog.Info($"[CaseManager] Dual suspect: wantTwo={wantTwo}, forceDual={_forceDualSuspects}");
+
+                if (wantTwo)
+                {
+                    Vector3 s2Pos = World.GetNextPositionOnStreet(spawnPos.Around(12f));
+                    Ped s2 = World.CreateRandomPed(s2Pos);
+                    if (s2 != null && s2.Exists())
+                    {
+                        EntityTracker.Instance.Register(s2, "case_suspect_2", "CaseManager");
+
+                        try { ResetSuspectVisualState(s2); } catch { }
+                        try { sc?.ApplyProfile(s2, profile); } catch { }
+
+                        _suspectHandles.Add(s2.Handle);
+                        _secondaryLastKnownPos = s2Pos;
+                        _secondaryLost = false;
+
+                        try
+                        {
+                            if (_secondarySuspectBlip != null) { try { _secondarySuspectBlip.Delete(); } catch { } _secondarySuspectBlip = null; }
+                            _secondarySuspectBlip = s2.AddBlip();
+                            _secondarySuspectBlip.Color = BlipColor.Red;
+                            _secondarySuspectBlip.IsShortRange = false;
+                            _secondarySuspectBlip.Name = "嫌疑人(2)";
+                        }
+                        catch { }
+
+                        _secondarySuspect = s2;
+
+                        ModLog.Info($"[CaseManager] Second suspect spawned: handle={s2.Handle}, total suspects={_suspectHandles.Count}");
+                        SmsNotification.Show("911调度", "更新", "~o~多名嫌疑人~s~：本案为双人案件（2名嫌疑人）。主嫌疑人已标记为红点，2号嫌疑人标记为“嫌疑人(2)”。");
+                    }
+
+                }
+
+                try { EventBus.Publish(new EF.PoliceMod.Core.SuspectHandleListChangedEvent(_suspectHandles)); } catch { }
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("[CaseManager] Dual suspect spawn failed: " + ex);
+            }
+
+            // 5️⃣ 基础行为
+            _suspect.IsPersistent = true;
+            _suspect.BlockPermanentEvents = true;
+
+            Vehicle caseVehicle = null;
+
+            if (_caseMode == CaseMode.VehicleFlee)
+            {
+                try
+                {
+                    Vector3 vehPos;
+                    try { vehPos = World.GetNextPositionOnStreet(spawnPos.Around(8f)); }
+                    catch { vehPos = spawnPos; }
+
+                    try
+                    {
+                        VehicleHash[] pool = new VehicleHash[]
+                        {
+                            VehicleHash.Primo,
+                            VehicleHash.Asea,
+                            VehicleHash.Sultan,
+                            VehicleHash.Blista,
+                            VehicleHash.Futo,
+                            VehicleHash.Prairie,
+                            VehicleHash.Ingot,
+                            VehicleHash.Adder,
+                        };
+                        var r = new Random(Game.GameTime + _suspect.Handle);
+                        var pick = pool[r.Next(pool.Length)];
+                        caseVehicle = World.CreateVehicle(pick, vehPos);
+                    }
+                    catch { caseVehicle = null; }
+
+                    if (caseVehicle != null && caseVehicle.Exists())
+                    {
+                        try { _suspect.SetIntoVehicle(caseVehicle, VehicleSeat.Driver); } catch { }
+
+                        if (_secondarySuspect != null && _secondarySuspect.Exists())
+                        {
+                            try
+                            {
+                                _secondarySuspect.SetIntoVehicle(caseVehicle, VehicleSeat.Passenger);
+                                ModLog.Info($"[CaseManager] Second suspect set as passenger: handle={_secondarySuspect.Handle}");
+                            }
+                            catch { }
+                        }
+
+                        try
+                        {
+                            Function.Call(Hash.TASK_VEHICLE_DRIVE_WANDER, _suspect.Handle, caseVehicle.Handle, 22.0f, 786468);
+                        }
+                        catch { }
+
+                        ModLog.Info($"[CaseManager] VehicleFlee case: suspect={_suspect.Handle} veh={caseVehicle.Handle}");
+                    }
+                    else
+                    {
+                        _suspect.Task.WanderAround();
+                        if (_secondarySuspect != null && _secondarySuspect.Exists())
+                        {
+                            try { _secondarySuspect.Task.WanderAround(_secondarySuspect.Position, 20f); } catch { }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ModLog.Error("[CaseManager] VehicleFlee spawn error: " + ex);
+                    try { _suspect.Task.WanderAround(); } catch { }
+                }
+            }
+            else
+            {
+                _suspect.Task.WanderAround();
+                if (_secondarySuspect != null && _secondarySuspect.Exists())
+                {
+                    try { _secondarySuspect.Task.WanderAround(_secondarySuspect.Position, 20f); } catch { }
+                }
+            }
+
+            // 记录“最后已知位置”
+            try { _suspectLastKnownPos = _suspect.Position; } catch { _suspectLastKnownPos = spawnPos; }
+            _suspectLastKnownAtMs = Game.GameTime;
+            _suspectLost = false;
+
+            // 6️⃣ 地图红点（主嫌疑人）
+            _suspectBlip = _suspect.AddBlip();
+            _suspectBlip.Sprite = BlipSprite.Standard;
+            _suspectBlip.Color = BlipColor.Red;
+            _suspectBlip.Scale = 0.9f;
+            _suspectBlip.Name = "嫌疑人(1)";
+
+
+            // 若之前存在搜索圈，清掉
+            try { ClearSuspectSearchArea(); } catch { }
+
+            _caseActive = true;
+            _lastKnownSuspect = _suspect;
+            try { _lastKnownSuspectHandle = _suspect.Handle; } catch { }
+
+            Notification.Show("~r~新案件：发现可疑人员");
+
+            // 双人案件：在主红点创建后，再兜底给 2 号嫌疑人补一次 blip（防止前面 AddBlip 静默失败）
+            try
+            {
+                if (_secondarySuspect != null && _secondarySuspect.Exists())
+                {
+                    if (_secondarySuspectBlip == null || !_secondarySuspectBlip.Exists())
+                    {
+                        _secondarySuspectBlip = _secondarySuspect.AddBlip();
+                        _secondarySuspectBlip.Color = BlipColor.Red;
+                        _secondarySuspectBlip.IsShortRange = false;
+                        _secondarySuspectBlip.Name = "嫌疑人(2)";
+                        ModLog.Info("[CaseManager] Secondary blip fallback created");
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void ClearSuspectSearchArea()
+        {
+            if (_suspectSearchAreaBlip != null)
+            {
+                try { if (_suspectSearchAreaBlip.Exists()) _suspectSearchAreaBlip.Delete(); } catch { }
+            }
+            _suspectSearchAreaBlip = null;
+            _suspectLost = false;
+        }
+        public void MarkSuspectFound(Ped suspect, Vector3 pos)
+        {
+            try { _suspectLastKnownPos = pos; } catch { }
+            _suspectLastKnownAtMs = Game.GameTime;
+            _suspectRecoverAtMs = Game.GameTime + 5000;
+            _suspectLost = false;
+
+            _lastKnownSuspect = suspect;
+            _suspect = suspect;
+            try { _lastKnownSuspectHandle = (suspect != null && suspect.Exists()) ? suspect.Handle : _lastKnownSuspectHandle; } catch { }
+
+            try { ClearSuspectSearchArea(); } catch { }
+
+            try
+            {
+                if (_suspectBlip != null && _suspectBlip.Exists()) _suspectBlip.Delete();
+            }
+            catch { }
+            _suspectBlip = null;
+
+            try
+            {
+                if (suspect != null && suspect.Exists())
+                {
+                    _suspectBlip = suspect.AddBlip();
+                    _suspectBlip.Sprite = BlipSprite.Standard;
+                    _suspectBlip.Color = BlipColor.Red;
+                    _suspectBlip.Scale = 0.9f;
+                    _suspectBlip.Name = "嫌疑人";
+                }
+            }
+            catch { }
+
+            ModLog.Info($"[CaseManager] MarkSuspectFound: handle={suspect?.Handle}, pos={pos}, recoverProtectUntil={_suspectRecoverAtMs}");
+        }
+
+
+        private void TryEnterSuspectLostState()
+        {
+            if (_suspectLost) return;
+            _suspectLost = true;
+
+            try { PublishCaseStatusIfChanged(); } catch { }
+
+            try
+            {
+                if (_suspectBlip != null && _suspectBlip.Exists()) _suspectBlip.Delete();
+            }
+            catch { }
+            _suspectBlip = null;
+
+            // 创建“范围圈”（红色半透明）
+            try
+            {
+                // 半径可后续按星级/风险调整
+                float radius = 140f;
+                _suspectSearchAreaBlip = World.CreateBlip(_suspectLastKnownPos, radius);
+                _suspectSearchAreaBlip.Color = BlipColor.Red;
+                _suspectSearchAreaBlip.Alpha = 80;
+                _suspectSearchAreaBlip.IsShortRange = false;
+                _suspectSearchAreaBlip.Name = "嫌疑人可能位置";
+            }
+            catch { }
+
+            SmsNotification.Show("911调度", "目标丢失", "嫌疑人已脱离视野：已在地图标注大致范围（红色圈）。可在调度菜单呼叫侦察支援。");
+            ModLog.Warn("[CaseManager] Suspect lost -> search area blip created");
+        }
+
+        private void TickSecondarySuspect()
+        {
+            try
+            {
+                if (!_isOnDuty || !_caseActive) return;
+                if (_suspectHandles == null || _suspectHandles.Count < 2) return;
+
+                int handle2 = _suspectHandles[1];
+                if (handle2 <= 0) return;
+
+                var player = Game.Player.Character;
+                if (player == null || !player.Exists()) return;
+
+                // 找到 ped
+                Ped s2 = null;
+                try { s2 = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == handle2); } catch { s2 = null; }
+                if (s2 == null || !s2.Exists()) return;
+
+                try { _secondaryLastKnownPos = s2.Position; } catch { }
+
+                float dist = 99999f;
+                try { dist = player.Position.DistanceTo(_secondaryLastKnownPos); } catch { dist = 99999f; }
+
+                if (!_secondaryLost && dist >= LostIfFartherThan)
+                {
+                    _secondaryLost = true;
+                    // 简化：仅隐藏红点（阶段A 不创建搜索圈，避免 UI 干扰；后续可扩展）
+                    try { if (_secondarySuspectBlip != null && _secondarySuspectBlip.Exists()) _secondarySuspectBlip.Delete(); } catch { }
+                    _secondarySuspectBlip = null;
+                }
+
+                if (_secondaryLost && dist <= RecoverIfCloserThan)
+                {
+                    _secondaryLost = false;
+                    try
+                    {
+                        if (_secondarySuspectBlip != null) { try { _secondarySuspectBlip.Delete(); } catch { } _secondarySuspectBlip = null; }
+                        _secondarySuspectBlip = s2.AddBlip();
+                        _secondarySuspectBlip.Color = BlipColor.Red;
+                        _secondarySuspectBlip.IsShortRange = false;
+                        _secondarySuspectBlip.Name = "嫌疑人(2)";
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
+        private bool TrySwitchToNextPrimary(string reason)
+        {
+            try
+            {
+                if (_suspectHandles == null || _suspectHandles.Count < 2) return false;
+                if (_primarySuspectIndex != 0) return false; // 只支持从 0 切到 1（阶段A）
+
+                int nextHandle = _suspectHandles[1];
+                if (nextHandle <= 0) return false;
+
+                Ped nextPed = null;
+                try { nextPed = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == nextHandle); } catch { nextPed = null; }
+                if (nextPed == null || !nextPed.Exists()) return false;
+
+                // 提升为 primary
+                _primarySuspectIndex = 1;
+                _suspect = nextPed;
+                _lastKnownSuspect = nextPed;
+                try { _lastKnownSuspectHandle = nextPed.Handle; } catch { }
+
+                // 同步 lastKnown/lost 到 primary 的字段（保证侦察/丢失圈/红点都围绕 primary 运转）
+                _suspectLastKnownPos = _secondaryLastKnownPos;
+                _suspectLost = _secondaryLost;
+                _secondaryLost = false;
+
+                // 切换 blip：删除 secondary 的红点，用 primary 的红点/搜索圈显示
+                try { if (_secondarySuspectBlip != null && _secondarySuspectBlip.Exists()) _secondarySuspectBlip.Delete(); } catch { }
+                _secondarySuspectBlip = null;
+
+                try
+                {
+                    if (_suspectBlip != null && _suspectBlip.Exists()) _suspectBlip.Delete();
+                }
+                catch { }
+                _suspectBlip = null;
+
+                try { ClearSuspectSearchArea(); } catch { }
+
+                try
+                {
+                    if (!_suspectLost)
+                    {
+                        _suspectBlip = nextPed.AddBlip();
+                        _suspectBlip.Sprite = BlipSprite.Standard;
+                        _suspectBlip.Color = BlipColor.Red;
+                        _suspectBlip.Scale = 0.9f;
+                        _suspectBlip.Name = "嫌疑人";
+                    }
+                    else
+                    {
+                        TryEnterSuspectLostState();
+                    }
+                }
+                catch { }
+
+                // 复用现有单嫌疑人链路：TakeControl + RegisterSuspect
+                try
+                {
+                    var sc = EFCore.Instance?.GetSuspectController();
+                    sc?.TakeControl(nextPed);
+                }
+                catch { }
+
+                try
+                {
+                    EFCore.Instance?.LockTargetSystem?.RegisterSuspect(nextPed);
+                }
+                catch { }
+
+                // 广播列表变更（有系统想更新 UI 时用）
+                try { EventBus.Publish(new EF.PoliceMod.Core.SuspectHandleListChangedEvent(_suspectHandles)); } catch { }
+
+                ModLog.Info("[CaseManager] Switched primary suspect to index=1 due to " + reason);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void CleanupCase()
+        {
+            EventBus.Publish(new CaseEndedEvent());
+
+            _caseActive = false;
+
+            try { PublishCaseStatusIfChanged(); } catch { }
+            try { PublishTerminalAccessIfChanged(); } catch { }
+
+            if (_suspectBlip != null && _suspectBlip.Exists())
+                _suspectBlip.Delete();
+            try { ClearSuspectSearchArea(); } catch { }
+
+            try
+            {
+                if (_secondarySuspectBlip != null && _secondarySuspectBlip.Exists()) _secondarySuspectBlip.Delete();
+            }
+            catch { }
+            _secondarySuspectBlip = null;
+            _secondarySuspect = null;
+            _secondaryLost = false;
+
+            if (_suspect != null && _suspect.Exists())
+            {
+                try { ResetSuspectVisualState(_suspect); } catch { }
+                EntityTracker.Instance.CleanupEntity(_suspect.Handle);
+            }
+
+            try
+            {
+                if (_suspectHandles != null)
+                {
+                    foreach (var h in _suspectHandles)
+                    {
+                        if (h > 0 && (_suspect == null || h != _suspect.Handle))
+                        {
+                            EntityTracker.Instance.CleanupEntity(h);
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            try { _suspectHandles.Clear(); } catch { }
+            _primarySuspectIndex = 0;
+
+            _suspectBlip = null;
+            _suspect = null;
+            _caseActive = false;
+            _lastKnownSuspect = null;
+            _lastKnownSuspectHandle = -1;
+        }
+    }
+}

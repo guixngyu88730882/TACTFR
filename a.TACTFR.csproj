@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{D11360C6-DC68-418F-BF8E-8247D1FD80F5}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>a.TACTFR</RootNamespace>
+    <AssemblyName>a.TACTFR</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\x64\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <DebugType>full</DebugType>
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
+    <OutputPath>bin\x64\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>pdbonly</DebugType>
+    <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>7.3</LangVersion>
+    <ErrorReport>prompt</ErrorReport>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="ScriptHookVDotNet3">
+      <HintPath>D:\SteamLibrary\steamapps\common\Grand Theft Auto V Enhanced\ScriptHookVDotNet3.dll</HintPath>
+    </Reference>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
+  </ItemGroup>
+  <ItemGroup>
+    <Analyzer Include="D:\SteamLibrary\steamapps\common\Grand Theft Auto V Enhanced\ScriptHookVDotNet3.dll" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="ArrestMenuController.cs" />
+    <Compile Include="ArrestStyleState.cs" />
+    <Compile Include="ArrestSuppressionSystem.cs" />
+    <Compile Include="BehaviorKeeper.cs" />
+    <Compile Include="Behaviors.cs" />
+    <Compile Include="CaseManager.cs" />
+    <Compile Include="CaseManager.Extensions.cs" />
+    <Compile Include="CaseStatusEvents.cs" />
+    <Compile Include="CaseStatusQuery.cs" />
+    <Compile Include="CompositionRoot.cs" />
+    <Compile Include="CuffedPoseOps.cs" />
+    <Compile Include="CuffedVehicleDoorFlow.cs" />
+    <!-- CuffedVehicleEscortFlow / CuffedVehicleEscortTickFlow 已合并进 SuspectVehicleEscortExecutor；
+         如果兼容壳文件不存在（例如被清理/移动），需移除此引用以避免 CS2001。 -->
+    <Compile Include="CuffingSequenceSystem.cs" />
+    <Compile Include="DebugHud.cs" />
+    <Compile Include="DeliverSystem.cs" />
+    <Compile Include="DispatchMenuController.cs" />
+    <Compile Include="DispatchSupportSystem.cs" />
+    <Compile Include="DutyCleanupService.cs" />
+    <Compile Include="DutyEndReason.cs" />
+    <Compile Include="DutyLifecycleController.cs" />
+    <Compile Include="DutyQuery.cs" />
+    <Compile Include="DutyStateService.cs" />
+    <Compile Include="DualSuspectCoordinator.cs" />
+    <Compile Include="EFCore.cs" />
+    <Compile Include="EntityTracker.cs" />
+    <Compile Include="EventBus.cs" />
+    <Compile Include="HeliReconRequestedEvent.cs" />
+    <Compile Include="HeliReconSystem.cs" />
+    <Compile Include="HelpController.cs" />
+    <Compile Include="ICaseService.cs" />
+    <Compile Include="IDispatchService.cs" />
+    <Compile Include="IDutyService.cs" />
+    <Compile Include="InputEvents.cs" />
+    <Compile Include="InputManager.cs" />
+    <Compile Include="IPatrolService.cs" />
+    <Compile Include="ISuspectContext.cs" />
+    <Compile Include="ISuspectService.cs" />
+    <Compile Include="ISystem.cs" />
+    <Compile Include="LockTargetsystem.cs" />
+    <Compile Include="ModConfig.cs" />
+    <Compile Include="ModLog.cs" />
+    <Compile Include="OfficerSquadMenuController.cs" />
+    <Compile Include="OfficerSquadSystem.cs" />
+    <Compile Include="OfficerState.cs" />
+    <Compile Include="PatrolEvents.cs" />
+    <Compile Include="PatrolFleeSystem.cs" />
+    <Compile Include="PatrolMenuController.cs" />
+    <Compile Include="PatrolModeQuery.cs" />
+    <Compile Include="PatrolResistSystem.cs" />
+    <Compile Include="PatrolSearchSystem.cs" />
+    <Compile Include="PatrolSystem.cs" />
+    <Compile Include="PlayerRespawnFixSystem.cs" />
+    <Compile Include="PoliceEvents.cs" />
+    <Compile Include="PoliceTerminalController.cs" />
+    <Compile Include="PoliceTerminalUI.cs" />
+    <Compile Include="PoliceUniformSystem.cs" />
+    <Compile Include="PullOverEscortBypassActivatedEvent.cs" />
+    <Compile Include="PullOverEscortBypassState.cs" />
+    <Compile Include="PullOverExitRequestedEvent.cs" />
+    <Compile Include="PullOverRequestedEvent.cs" />
+    <Compile Include="PullOverSystem.cs" />
+    <Compile Include="SmsNotification.cs" />
+    <Compile Include="Snapshots.cs" />
+    <Compile Include="SoundFx.cs" />
+    <Compile Include="SquadStatusHud.cs" />
+    <Compile Include="StateMachine.cs" />
+    <Compile Include="SuspectController.cs" />
+    <Compile Include="SuspectDeadEvent.cs" />
+    <Compile Include="SuspectDeliveredEvent.cs" />
+    <Compile Include="SuspectEscapedEvent.cs" />
+    <Compile Include="SuspectEscapeOps.cs" />
+    <Compile Include="SuspectEscortLeaveVehicleRequestEvent.cs" />
+    <Compile Include="SuspectFollowOps.cs" />
+    <Compile Include="SuspectHandleListChangedEvent.cs" />
+    <Compile Include="SuspectOnFootExecutor.cs" />
+    <Compile Include="SuspectResistEvent.cs" />
+    <Compile Include="SuspectState.cs" />
+    <Compile Include="SuspectStateHub.cs" />
+    <Compile Include="SuspectVehicleEscortExecutor.cs" />
+    <Compile Include="TargetState.cs" />
+    <Compile Include="TerminalAccessEvents.cs" />
+    <Compile Include="TerminalAccessQuery.cs" />
+    <Compile Include="TerminalCaseSelectedEvent.cs" />
+    <Compile Include="ToggleHelpEvent.cs" />
+    <Compile Include="UIState.cs" />
+    <Compile Include="VehicleDoorOps.cs" />
+    <Compile Include="VehicleEscortInteractGate.cs" />
+    <!-- VehicleEscortLine / VehicleSeatDoorOps 已内聚到 SuspectVehicleEscortExecutor 内部静态类；
+         兼容壳文件已移除时，需同步移除此处引用，避免项目加载失败。 -->
+    <Compile Include="WantedRecord.cs" />
+    <Compile Include="WantedRegistry.cs" />
+    <Compile Include="WantedTargetSelectedEvent.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="Properties\" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
