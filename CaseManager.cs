@@ -847,10 +847,19 @@ namespace EF.PoliceMod
         {
             if (!_isOnDuty || !_caseActive) return;
 
+
             int escapedHandle = e.SuspectHandle;
             if (escapedHandle <= 0 || !IsHandleInCurrentCase(escapedHandle)) return;
 
             try { MarkEscaped(escapedHandle); } catch { }
+
+
+
+            int escapedHandle = e.SuspectHandle;
+            if (escapedHandle <= 0 || !IsHandleInCurrentCase(escapedHandle)) return;
+
+            try { MarkEscaped(escapedHandle); } catch { }
+
 
             // 仍有未终态嫌疑人则继续；否则失败结案
             try
@@ -1404,6 +1413,7 @@ namespace EF.PoliceMod
 
                 ModLog.Info($"[CaseManager] Dual suspect: wantTwo={wantTwo}, forceDual={_forceDualSuspects}");
 
+
                 if (wantTwo)
                 {
                     Ped s2 = null;
@@ -1426,6 +1436,29 @@ namespace EF.PoliceMod
                         Vector3 s2Pos = s2.Position;
                         EntityTracker.Instance.Register(s2, "case_suspect_2", "CaseManager");
 
+                if (wantTwo)
+                {
+                    Ped s2 = null;
+                    for (int i = 0; i < 4 && (s2 == null || !s2.Exists()); i++)
+                    {
+                        try
+                        {
+                            Vector3 seed = (i == 0) ? spawnPos.Around(12f) : spawnPos.Around(12f + i * 8f);
+                            Vector3 s2PosTry = World.GetNextPositionOnStreet(seed);
+                            s2 = World.CreateRandomPed(s2PosTry);
+                        }
+                        catch
+                        {
+                            s2 = null;
+                        }
+                    }
+
+                    if (s2 != null && s2.Exists())
+                    {
+                        Vector3 s2Pos = s2.Position;
+                        EntityTracker.Instance.Register(s2, "case_suspect_2", "CaseManager");
+
+
                         try { ResetSuspectVisualState(s2); } catch { }
                         try { sc?.ApplyProfile(s2, profile); } catch { }
 
@@ -1446,6 +1479,7 @@ namespace EF.PoliceMod
 
                         _secondarySuspect = s2;
 
+
                         ModLog.Info($"[CaseManager] Second suspect spawned: handle={s2.Handle}, total suspects={_suspectHandles.Count}");
                         SmsNotification.Show("911调度", "更新", "~o~多名嫌疑人~s~：本案为双人案件（2名嫌疑人）。主嫌疑人已标记为红点，2号嫌疑人标记为“嫌疑人(2)”。");
                     }
@@ -1456,6 +1490,17 @@ namespace EF.PoliceMod
                     }
 
                 }
+                        ModLog.Info($"[CaseManager] Second suspect spawned: handle={s2.Handle}, total suspects={_suspectHandles.Count}");
+                        SmsNotification.Show("911调度", "更新", "~o~多名嫌疑人~s~：本案为双人案件（2名嫌疑人）。主嫌疑人已标记为红点，2号嫌疑人标记为“嫌疑人(2)”。");
+                    }
+                    else
+                    {
+                        ModLog.Warn("[CaseManager] Dual suspect requested but second suspect spawn failed after retries");
+                        SmsNotification.Show("911调度", "更新", "~y~双人案件补员失败：已保留主嫌疑人，建议刷新后重试。");
+                    }
+
+                }
+
 
                 try { EventBus.Publish(new EF.PoliceMod.Core.SuspectHandleListChangedEvent(_suspectHandles)); } catch { }
             }
