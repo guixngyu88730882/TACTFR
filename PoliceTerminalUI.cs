@@ -81,7 +81,7 @@ namespace EF.PoliceMod.Systems
             BuildRootOptions();
 
             RequestTextureDict();
-            EF.PoliceMod.Core.UIState.MarkPoliceTerminalOpened();
+            EF.PoliceMod.Core.UIState.MarkPoliceTerminalOpen(Game.GameTime);
         }
 
         public void Close()
