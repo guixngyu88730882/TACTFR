@@ -322,7 +322,7 @@ namespace EF.PoliceMod.Input
 
 
             // F7：调度菜单（仅执勤后可用）
-            if (Game.IsKeyPressed(EF.PoliceMod.Core.KeyBindings.DispatchMenu))
+            if (IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.DispatchMenu))
             {
                 if (!_dispatchMenuHeld)
                 {

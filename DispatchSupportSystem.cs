@@ -332,7 +332,7 @@ namespace EF.PoliceMod.Systems
                             // 鍏滃簳锛氭湁鏃?AI 浼?鎵撴柟鍚戠洏浣嗕笉韪╂补闂?锛岃繖閲屽己鍒舵澗鍒硅溅/鍚姩寮曟搸骞剁粰涓€鐐瑰墠杩涢€熷害鎻愮ず
                             try { Function.Call(Hash.SET_VEHICLE_ENGINE_ON, veh.Handle, true, true, false); } catch { }
                             try { Function.Call(Hash.SET_VEHICLE_BRAKE_LIGHTS, veh.Handle, false); } catch { }
-                            try { Function.Call(Hash.SET_VEHICLE_FORWARD_SPEED, veh.Handle, 6.5f); } catch { }
+                            // 不再强推前进速度，避免 AI 在转向时出现“刹车+倒挡”抖动
                             try { Function.Call(Hash.SET_VEHICLE_OUT_OF_CONTROL, veh.Handle, false, false); } catch { }
                             try { Function.Call(Hash.SET_VEHICLE_REDUCE_GRIP, veh.Handle, false); } catch { }
                             try { Function.Call(Hash.SET_VEHICLE_DOORS_LOCKED_FOR_ALL_PLAYERS, veh.Handle, false); } catch { }

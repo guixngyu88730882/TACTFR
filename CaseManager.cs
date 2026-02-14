@@ -1274,15 +1274,15 @@ namespace EF.PoliceMod
             }
 
             // 终端“偏远/郊区/市区”生成距离：把嫌疑人刷远一点，避免太近无聊
-            float spawnRadius = 520f;
+            float spawnRadius = 220f;
             try
             {
                 int region = (_terminalOptionId >= 0 && _terminalOptionId <= 5) ? (_terminalOptionId % 3) : 0;
-                if (region == 0) spawnRadius = 320f;      // 市区
-                else if (region == 1) spawnRadius = 650f; // 郊区
-                else spawnRadius = 980f;                  // 偏远
+                if (region == 0) spawnRadius = 120f;      // 市区：尽量就近，不要开局就丢失
+                else if (region == 1) spawnRadius = 220f; // 郊区
+                else spawnRadius = 320f;                  // 偏远
             }
-            catch { spawnRadius = 520f; }
+            catch { spawnRadius = 220f; }
 
             Vector3 spawnPos = World.GetNextPositionOnStreet(
                 spawnSeed.Around(spawnRadius)
@@ -1431,6 +1431,9 @@ namespace EF.PoliceMod
             // 5️⃣ 基础行为
             _suspect.IsPersistent = true;
             _suspect.BlockPermanentEvents = true;
+
+            // 新案生成保护期：避免刚开局就因距离判定进入 LOST（导致必须立刻直升机勘探）
+            _suspectRecoverAtMs = Game.GameTime + 45000;
 
             Vehicle caseVehicle = null;
 
