@@ -133,7 +133,7 @@ namespace EF.PoliceMod.Systems
             bool canClose = (now - _openedAtMs) > 250;
 
             bool cancel = IsRawKeyDown(Keys.NumPad0)
-                || IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.PatrolMenu)
+                || IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.ArrestMenu)
                 || IsRawKeyDown(Keys.Back);
             if (cancel && canClose)
             {
