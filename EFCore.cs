@@ -119,8 +119,6 @@ namespace EF.PoliceMod
                 DisableLawAuthority();
             });
 
-            EventBus.Subscribe<DutyStartedEvent>(_ => _caseManager.StartDuty());
-            EventBus.Subscribe<DutyEndedEvent>(e => _caseManager.OnDutyEnded(e));
             _wantedRegistry = new EF.PoliceMod.Data.WantedRegistry();
             _terminalController = new EF.PoliceMod.Systems.PoliceTerminalController(_wantedRegistry);
             _helpController = new EF.PoliceMod.Core.HelpController();
@@ -367,11 +365,8 @@ namespace EF.PoliceMod
         {
             Ped player = Game.Player.Character;
 
-            // ★ 新增：玩家死亡直接结束案件
-            if (player != null && player.Exists() && player.IsDead)
-            {
-                EventBus.Publish(new DutyEndedEvent());
-            }
+            // 玩家死亡时由 DutyLifecycleController / PlayerRespawnFixSystem 处理，
+            // 这里不要每帧广播 DutyEndedEvent，避免事件风暴。
 
             if (_lawAuthorityActive)
             {
