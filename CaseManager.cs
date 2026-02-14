@@ -662,11 +662,6 @@ namespace EF.PoliceMod
 
             SmsNotification.Show("911调度", "新的警情", profile.Briefing);
 
-            // 用完即清：下一次案件（例如嫌疑人死亡自动再派发）仍走随机逻辑
-            _useTerminalPreset = false;
-            _terminalOptionId = -1;
-            _terminalStars = 0;
-            _forceDualSuspects = false;
             // 例：StartCase() 中把案件标记为 active 的那段后面加：
             if (_pendingBoardedEvents.Count > 0)
             {
@@ -679,6 +674,12 @@ namespace EF.PoliceMod
             }
 
             SpawnSuspect(profile);
+
+            // 用完即清：必须在 SpawnSuspect 之后，避免本次案件读不到终端预设（双人案件会退化成单人）
+            _useTerminalPreset = false;
+            _terminalOptionId = -1;
+            _terminalStars = 0;
+            _forceDualSuspects = false;
         }
 
         public void StartDuty()
@@ -1928,7 +1929,25 @@ namespace EF.PoliceMod
 
         private void CleanupCase()
         {
-            EventBus.Publish(new CaseEndedEvent());
+            if (handle <= 0) return;
+            try
+            {
+                foreach (var s in _caseSuspects)
+                {
+                    if (s == null) continue;
+                    s.IsPrimary = (s.Handle == handle);
+                }
+            }
+            catch { }
+        }
+
+        private void CleanupCase()
+        {
+            bool hadActiveCase = _caseActive || _suspect != null || (_suspectHandles != null && _suspectHandles.Count > 0);
+            if (hadActiveCase)
+            {
+                EventBus.Publish(new CaseEndedEvent());
+            }
 
             _caseActive = false;
 

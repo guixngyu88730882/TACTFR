@@ -298,7 +298,6 @@ namespace EF.PoliceMod.Systems
 
                             try { drv.Task.ClearAll(); } catch { }
                             u.IsFollowing = true;
-                            ModLog.Info($"[Dispatch] Follow refresh: drv={drv.Handle}, veh={veh.Handle}");
 
                             if (pv != null && pv.Exists())
                             {
