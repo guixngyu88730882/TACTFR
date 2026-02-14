@@ -15,8 +15,9 @@ namespace EF.PoliceMod.Systems
         private int _lastActionAtMs = 0;
         private const int CooldownMs = 1200;
 
-        private const int FollowUpdateDebounceMs = 400;
+        private const int FollowUpdateDebounceMs = 1200;
         private int _lastFollowUpdateAtMs = 0;
+        private const float FollowMaxSpeed = 40.0f;
         private bool _initialized = false;
 
         private enum ConvoyMode
@@ -297,20 +298,35 @@ namespace EF.PoliceMod.Systems
 
                             try { drv.Task.ClearAll(); } catch { }
                             u.IsFollowing = true;
-                            ModLog.Info($"[Dispatch] Follow refresh: drv={drv.Handle}, veh={veh.Handle}");
 
                             if (pv != null && pv.Exists())
                             {
-                                // 任务跟随玩家车辆
-                                // 更激进的驾驶参数，避免“只打方向不走”
-                                Function.Call(Hash.TASK_VEHICLE_FOLLOW, drv.Handle, veh.Handle, pv.Handle, 28.0f, 786603, 8);
+                                try
+                                {
+                                    Function.Call(Hash.TASK_VEHICLE_FOLLOW, drv.Handle, veh.Handle, pv.Handle, FollowMaxSpeed, 786603, 8);
+                                }
+                                catch
+                                {
+                                    try
+                                    {
+                                        Function.Call(Hash.TASK_VEHICLE_ESCORT,
+                                            drv.Handle,
+                                            veh.Handle,
+                                            pv.Handle,
+                                            -1,
+                                            FollowMaxSpeed,
+                                            786603,
+                                            18.0f,
+                                            8,
+                                            0.0f);
+                                    }
+                                    catch { }
+                                }
                             }
-
-
                             else
                             {
-                                // 鐜╁寰掓锛氳溅杈嗗紑鍒扮帺瀹惰韩鍚?                                Vector3 dest = player.Position - player.ForwardVector * 12f;
-                                Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD, drv.Handle, veh.Handle, dest.X, dest.Y, dest.Z, 28.0f, 0, veh.Model.Hash, 786603, -1.0f, 1.0f);
+                                Vector3 dest = player.Position;
+                                Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD, drv.Handle, veh.Handle, dest.X, dest.Y, dest.Z, FollowMaxSpeed, 0, veh.Model.Hash, 786603, 6.0f, 3.0f);
                             }
 
                             // 鍏滃簳锛氭湁鏃?AI 浼?鎵撴柟鍚戠洏浣嗕笉韪╂补闂?锛岃繖閲屽己鍒舵澗鍒硅溅/鍚姩寮曟搸骞剁粰涓€鐐瑰墠杩涢€熷害鎻愮ず
