@@ -15,9 +15,9 @@ namespace EF.PoliceMod.Systems
         private int _lastActionAtMs = 0;
         private const int CooldownMs = 1200;
 
-        private const int FollowUpdateDebounceMs = 1200;
+        private const int FollowUpdateDebounceMs = 400;
         private int _lastFollowUpdateAtMs = 0;
-        private const float FollowMaxSpeed = 40.0f;
+        private const float FollowMaxSpeed = 32.0f;
         private bool _initialized = false;
 
         private enum ConvoyMode
@@ -301,26 +301,26 @@ namespace EF.PoliceMod.Systems
 
                             if (pv != null && pv.Exists())
                             {
+                                bool escorted = false;
                                 try
                                 {
-                                    Function.Call(Hash.TASK_VEHICLE_FOLLOW, drv.Handle, veh.Handle, pv.Handle, FollowMaxSpeed, 786603, 8);
+                                    Function.Call(Hash.TASK_VEHICLE_ESCORT,
+                                        drv.Handle,
+                                        veh.Handle,
+                                        pv.Handle,
+                                        -1,
+                                        FollowMaxSpeed,
+                                        786603,
+                                        18.0f,
+                                        8,
+                                        0.0f);
+                                    escorted = true;
                                 }
-                                catch
+                                catch { escorted = false; }
+
+                                if (!escorted)
                                 {
-                                    try
-                                    {
-                                        Function.Call(Hash.TASK_VEHICLE_ESCORT,
-                                            drv.Handle,
-                                            veh.Handle,
-                                            pv.Handle,
-                                            -1,
-                                            FollowMaxSpeed,
-                                            786603,
-                                            18.0f,
-                                            8,
-                                            0.0f);
-                                    }
-                                    catch { }
+                                    Function.Call(Hash.TASK_VEHICLE_FOLLOW, drv.Handle, veh.Handle, pv.Handle, FollowMaxSpeed, 786603, 8);
                                 }
                             }
                             else
