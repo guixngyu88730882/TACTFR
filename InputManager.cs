@@ -70,9 +70,9 @@ namespace EF.PoliceMod.Input
             bool pressedT = IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.VehicleTerminal);
 
 
-            // 巡逻指令菜单（Q 打开）：巡逻模式开启 + 已锁定目标 + 当前不在案件链路，才允许打开。
+            // 巡逻指令菜单（H 打开）：巡逻模式开启 + 已锁定目标 + 当前不在案件链路，才允许打开。
             // 说明：巡逻链路与案件链路分离；案件进行中时 H 保留给拘捕菜单。
-            bool patrolMenuHotkey = IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.PatrolMenu);
+            bool patrolMenuHotkey = IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.ArrestMenu);
             if (patrolMenuHotkey)
             {
                 if (!_yHeldRaw)
@@ -88,7 +88,7 @@ namespace EF.PoliceMod.Input
                         if (patrolOn && hasLockedTarget && !hasActiveCase)
                         {
                             EventBus.Publish(new EF.PoliceMod.Core.PatrolMenuToggledEvent(true));
-                            ModLog.Info("[Input] Q pressed -> PatrolMenu opened");
+                            ModLog.Info("[Input] H pressed -> PatrolMenu opened");
                         }
                     }
                     catch { }

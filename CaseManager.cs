@@ -844,14 +844,24 @@ namespace EF.PoliceMod
             SmsNotification.Show("911调度", "案件结束", "嫌疑人终态已确认，请返回终端手动接收下一案。");
         }
 
+
         private void OnSuspectEscaped(EF.PoliceMod.Core.SuspectEscapedEvent e)
         {
             if (!_isOnDuty || !_caseActive) return;
 
-            int escapedHandle = e.SuspectHandle;
+            int escapedHandle = -1;
+            try { escapedHandle = e.SuspectHandle; } catch { escapedHandle = -1; }
+            if (escapedHandle <= 0)
+            {
+                try { escapedHandle = (_lastKnownSuspect != null && _lastKnownSuspect.Exists()) ? _lastKnownSuspect.Handle : -1; } catch { escapedHandle = -1; }
+            }
+
             if (escapedHandle <= 0 || !IsHandleInCurrentCase(escapedHandle)) return;
 
             try { MarkEscaped(escapedHandle); } catch { }
+
+
+
 
             // 仍有未终态嫌疑人则继续；否则失败结案
             try
@@ -1350,37 +1360,8 @@ namespace EF.PoliceMod
             // 4️⃣ 注册给锁定系统
             EFCore.Instance.LockTargetSystem.RegisterSuspect(_suspect);
 
-            // 双嫌疑人模式下：避免 “嫌疑人(2)” 没上图。这里补一条日志，方便你看 EF_PoliceMod.log 是否真的走到 wantTwo=true 分支。
-            try { ModLog.Info($"[CaseManager] After primary RegisterSuspect: handlesCount={_suspectHandles.Count}, forceDual={_forceDualSuspects}, stars={_terminalStars}, useTerminal={_useTerminalPreset}"); } catch { }
-
-                // 如果终端明确选了双人模板，但字段被意外清空，则以 optionId 范围兜底强制双人
-                try
-                {
-                    if (_terminalOptionId >= 0 && _terminalOptionId <= 5 && _forceDualSuspects == false)
-                    {
-                        // no-op
-                    }
-                }
-                catch { }
-
-
-
-                // 如果终端明确选了双人模板，但字段被意外清空，则以 optionId 范围兜底强制双人
-                try
-                {
-                    if (_terminalOptionId >= 0 && _terminalOptionId <= 5 && _forceDualSuspects == false)
-                    {
-                        // no-op
-                    }
-                }
-                catch { }
-
-
-
-
-            // ===== 双嫌疑人（阶段A）：按终端星级概率生成第二名嫌疑人 =====
-            // 规则：stars>=4 有概率双人；stars>=5 必定双人；双人案件选项强制双人
-            ModLog.Info($"[CaseManager] Dual suspect check: _useTerminalPreset={_useTerminalPreset}, _terminalStars={_terminalStars}");
+            // 双嫌疑人（阶段A）简化实现：按预设/星级决定是否生成第二嫌疑人
+            ModLog.Info($"[CaseManager] Dual suspect check: _useTerminalPreset={_useTerminalPreset}, _terminalStars={_terminalStars}, _forceDualSuspects={_forceDualSuspects}");
             try
             {
                 _suspectHandles.Clear();
@@ -1388,20 +1369,8 @@ namespace EF.PoliceMod
                 _primarySuspectIndex = 0;
                 RegisterCaseSuspect(_suspect, 0, true);
 
-
-                bool wantTwo = false;
-                // 终端双人模板：强制双人（稳定、可验收）
-                if (_forceDualSuspects)
-                {
-                    wantTwo = true;
-                }
-                // 非双人模板：仍保留“高星概率双人”
-                else if (_useTerminalPreset)
-                {
-                    if (_terminalStars >= 5) wantTwo = true;
-                    else if (_terminalStars >= 4) wantTwo = true; // 原先 50% 改为必出，便于测试/体验
-                }
-
+                // 规则：终端强制或终端预设且星级>=4
+                bool wantTwo = _forceDualSuspects || (_useTerminalPreset && _terminalStars >= 4);
 
                 ModLog.Info($"[CaseManager] Dual suspect: wantTwo={wantTwo}, forceDual={_forceDualSuspects}");
 
@@ -1413,40 +1382,21 @@ namespace EF.PoliceMod
                         try
                         {
                             Vector3 seed = (i == 0) ? spawnPos.Around(12f) : spawnPos.Around(12f + i * 8f);
-                            Vector3 s2PosTry = World.GetNextPositionOnStreet(seed);
-                            s2 = World.CreateRandomPed(s2PosTry);
+                            Vector3 tryPos = World.GetNextPositionOnStreet(seed);
+                            s2 = World.CreateRandomPed(tryPos);
                         }
-                        catch
-                        {
-                            s2 = null;
-                        }
+                        catch { s2 = null; }
                     }
 
                     if (s2 != null && s2.Exists())
                     {
-                        try
-                        {
-                            // 强制把副嫌疑人拉到主嫌疑人附近可见范围，避免“地图有红点但看不到模型”
-                            Vector3 nearPrimary = _suspect.Position.Around(8f);
-                            Vector3 nearRoad = World.GetNextPositionOnStreet(nearPrimary);
-                            if (nearRoad != Vector3.Zero)
-                            {
-                                s2.Position = nearRoad;
-                            }
-                        }
-                        catch { }
-
-                        Vector3 s2Pos = s2.Position;
-                        EntityTracker.Instance.Register(s2, "case_suspect_2", "CaseManager");
-
+                        try { EntityTracker.Instance.Register(s2, "case_suspect_2", "CaseManager"); } catch { }
                         try { ResetSuspectVisualState(s2); } catch { }
                         try { sc?.ApplyProfile(s2, profile); } catch { }
-                        try { s2.IsPersistent = true; } catch { }
-                        try { s2.BlockPermanentEvents = true; } catch { }
 
-                        _suspectHandles.Add(s2.Handle);
-                        RegisterCaseSuspect(s2, 1, false);
-                        _secondaryLastKnownPos = s2Pos;
+                        try { _suspectHandles.Add(s2.Handle); } catch { }
+                        try { RegisterCaseSuspect(s2, 1, false); } catch { }
+                        try { _secondaryLastKnownPos = s2.Position; } catch { }
                         _secondaryLost = false;
 
                         try
@@ -1469,7 +1419,6 @@ namespace EF.PoliceMod
                         ModLog.Warn("[CaseManager] Dual suspect requested but second suspect spawn failed after retries");
                         SmsNotification.Show("911调度", "更新", "~y~双人案件补员失败：已保留主嫌疑人，建议刷新后重试。");
                     }
-
                 }
 
                 try { EventBus.Publish(new EF.PoliceMod.Core.SuspectHandleListChangedEvent(_suspectHandles)); } catch { }
@@ -1839,6 +1788,7 @@ namespace EF.PoliceMod
             }
             catch { }
         }
+
 
         private void CleanupCase()
         {
