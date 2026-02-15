@@ -30,6 +30,9 @@ namespace EF.PoliceMod.Gameplay
         private float _resistChance = 0f;
         private bool _hasFirearm = false;
 
+        // 关闭“瞄准/拘捕时受惊逃跑”随机链路，避免案件流程被随机打断。
+        private const bool DisableFrightenedEscapeOnArrest = true;
+
         // 只读暴露：供 PullOverSystem 等模块做“高危”判定
         public float ResistChance => _resistChance;
         public bool HasFirearm => _hasFirearm;
@@ -430,9 +433,10 @@ namespace EF.PoliceMod.Gameplay
             {
                 bool canResist = CanResist(player);
                 double roll = _rand.NextDouble();
-                ModLog.Info($"[SuspectController] TryAttemptArrest: ped={handle}, canResist={canResist}, roll={roll:F3}");
+                ModLog.Info($"[SuspectController] TryAttemptArrest: ped={handle}, canResist={canResist}, roll={roll:F3}, escapeDisabled={DisableFrightenedEscapeOnArrest}");
 
-                if (canResist && roll < _resistChance)
+                // 按需关闭“受惊逃跑/反抗”随机链路：玩家瞄准并执行拘捕时不再随机逃跑。
+                if (!DisableFrightenedEscapeOnArrest && canResist && roll < _resistChance)
                 {
                     ModLog.Info($"[SuspectController] Resistance condition met for ped={handle} → TriggerResistance");
 
@@ -441,7 +445,7 @@ namespace EF.PoliceMod.Gameplay
                     return false;
                 }
 
-                // 没有抵抗 → 执行拘捕
+                // 不触发随机反抗 → 执行拘捕
                 Arrest(_currentSuspect);
                 return true;
             }
