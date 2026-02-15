@@ -231,6 +231,11 @@ namespace EF.PoliceMod.Systems
 
         public void SetConvoyFollowPlayer()
         {
+            int now = Game.GameTime;
+            if (_convoyMode == ConvoyMode.FollowPlayer && (now - _lastFollowModeAtMs) < FollowModeDebounceMs)
+                return;
+
+            _lastFollowModeAtMs = now;
             _convoyMode = ConvoyMode.FollowPlayer;
             _lastFollowUpdateAtMs = 0;
             foreach (var u in _backupUnits) u.IsFollowing = false;
