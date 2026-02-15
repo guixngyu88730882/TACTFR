@@ -487,7 +487,7 @@ namespace EF.PoliceMod.Executors
                         var seat2 = FindAvailableSeatForSuspect(nearVeh);
                         if (seat2 == VehicleSeat.None)
                         {
-                            Notification.Show("~y~没有可用座位");
+                            Notification.Show("~y~车辆无空位");
                             return;
                         }
 
@@ -635,17 +635,7 @@ namespace EF.PoliceMod.Executors
                 // 如果不在车内：切换跟随/取消跟随
                 if (!_isSuspectFollowing || _followingSuspectHandle != suspect.Handle)
                 {
-                    // 逃跑概率：按 G 的瞬间有概率逃跑（车内不触发）
-                    try
-                    {
-                        if (SuspectEscapeOps.TryEscapeOnFollowRequest(_suspectController, _stateHub, suspect, _rand, 0.10))
-                        {
-                            _isSuspectFollowing = false;
-                            _followingSuspectHandle = -1;
-                            return;
-                        }
-                    }
-                    catch { }
+                    // 关闭“受惊逃跑”随机触发：按 G 只负责进入跟随，避免流程被随机打断。
 
                     _isSuspectFollowing = true;
                     _followingSuspectHandle = suspect.Handle;
