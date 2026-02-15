@@ -23,6 +23,7 @@ namespace EF.PoliceMod.Input
         private bool _pullOverExitHeld = false;
         private bool _dispatchMenuHeld = false;
         private bool _lockHeld = false;
+        private bool _unlockHeld = false;
         private bool _f8Held = false;
         private bool _hHeldRaw = false;
         private bool _gHeldRaw = false;
@@ -299,6 +300,31 @@ namespace EF.PoliceMod.Input
             else
             {
                 _lockHeld = false;
+            }
+
+            // CTRL：瞄准当前锁定目标时手动解锁（按一次生效）
+            bool ctrlDown = IsRawKeyDown(Keys.ControlKey) || IsRawKeyDown(Keys.LControlKey) || IsRawKeyDown(Keys.RControlKey);
+            if (ctrlDown)
+            {
+                if (!_unlockHeld)
+                {
+                    _unlockHeld = true;
+                    try
+                    {
+                        var core = EFCore.Instance;
+                        var lts = core != null ? core.LockTargetSystem : null;
+                        if (lts != null && lts.HasTarget && lts.IsPlayerAimingCurrentTarget())
+                        {
+                            EventBus.Publish(new LockTargetClearRequestedEvent());
+                            Notification.Show("~y~已解除锁定");
+                        }
+                    }
+                    catch { }
+                }
+            }
+            else
+            {
+                _unlockHeld = false;
             }
 
             // H 拘捕已由“拘捕动作菜单”接管（见上方 OpenArrestActionMenuEvent），这里不再重复发布。

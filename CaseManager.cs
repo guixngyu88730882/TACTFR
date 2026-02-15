@@ -524,6 +524,33 @@ namespace EF.PoliceMod
             return false;
         }
 
+        private void ClearSuspectVisualByHandle(int handle)
+        {
+            if (handle <= 0) return;
+            try
+            {
+                if (_suspect != null && _suspect.Exists() && _suspect.Handle == handle)
+                {
+                    try { if (_suspectBlip != null && _suspectBlip.Exists()) _suspectBlip.Delete(); } catch { }
+                    _suspectBlip = null;
+                    try { ClearSuspectSearchArea(); } catch { }
+                    _suspectLost = false;
+                }
+            }
+            catch { }
+
+            try
+            {
+                if (_suspectHandles != null && _suspectHandles.Count > 1 && _suspectHandles[1] == handle)
+                {
+                    try { if (_secondarySuspectBlip != null && _secondarySuspectBlip.Exists()) _secondarySuspectBlip.Delete(); } catch { }
+                    _secondarySuspectBlip = null;
+                    _secondaryLost = false;
+                }
+            }
+            catch { }
+        }
+
         private void MarkDead(int handle)
         {
             if (handle <= 0) return;
@@ -533,6 +560,7 @@ namespace EF.PoliceMod
                 {
                     if (s == null || s.Handle != handle) continue;
                     s.Status = EF.PoliceMod.Core.CaseSuspectStatus.Dead;
+                    try { ClearSuspectVisualByHandle(handle); } catch { }
                     ModLog.Info($"[CaseManager] MarkDead: handle={handle}");
                     return;
                 }
@@ -795,18 +823,21 @@ namespace EF.PoliceMod
             ModLog.Info("[CaseManager] SuspectDeadEvent received");
             try { MarkDead(deadHandle); } catch { }
 
-            // 视觉与导航清理（仅针对当前主嫌疑人）
+            // 视觉与导航清理（按死亡 handle 精准处理，避免误操作当前存活主嫌疑人）
             try
             {
-                if (_lastKnownSuspect != null && _lastKnownSuspect.Exists())
+                Ped deadPed = null;
+                try { deadPed = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == deadHandle); } catch { deadPed = null; }
+                if (deadPed != null && deadPed.Exists())
                 {
-                    try { Function.Call(Hash.SET_PED_TO_RAGDOLL, _lastKnownSuspect.Handle, 5000, 5000, 0, false, false, false); } catch { }
-                    try { Function.Call(Hash.FREEZE_ENTITY_POSITION, _lastKnownSuspect.Handle, true); } catch { }
+                    try { Function.Call(Hash.CLEAR_PED_TASKS_IMMEDIATELY, deadPed.Handle); } catch { }
+                    try { Function.Call(Hash.SET_PED_TO_RAGDOLL, deadPed.Handle, 5000, 5000, 0, false, false, false); } catch { }
+                    try { Function.Call(Hash.FREEZE_ENTITY_POSITION, deadPed.Handle, true); } catch { }
                 }
             }
             catch (Exception ex)
             {
-                ModLog.Error("[CaseManager] Error during ragdoll/freeze: " + ex);
+                ModLog.Error("[CaseManager] Error during dead-suspect freeze: " + ex);
             }
 
             try { ClearDeliveryRoute(); } catch (Exception ex) { ModLog.Error("[CaseManager] ClearDeliveryRoute error: " + ex); }
@@ -1646,6 +1677,13 @@ namespace EF.PoliceMod
                 Ped s2 = null;
                 try { s2 = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == handle2); } catch { s2 = null; }
                 if (s2 == null || !s2.Exists()) return;
+                if (s2.IsDead)
+                {
+                    try { if (_secondarySuspectBlip != null && _secondarySuspectBlip.Exists()) _secondarySuspectBlip.Delete(); } catch { }
+                    _secondarySuspectBlip = null;
+                    _secondaryLost = false;
+                    return;
+                }
 
                 try { _secondaryLastKnownPos = s2.Position; } catch { }
 
@@ -1689,7 +1727,7 @@ namespace EF.PoliceMod
 
                 Ped nextPed = null;
                 try { nextPed = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == nextHandle); } catch { nextPed = null; }
-                if (nextPed == null || !nextPed.Exists()) return false;
+                if (nextPed == null || !nextPed.Exists() || nextPed.IsDead) return false;
 
                 // 提升为 primary
                 _primarySuspectIndex = 1;
@@ -1791,6 +1829,23 @@ namespace EF.PoliceMod
             catch { }
         }
 
+        private void ResetEscortPipelineState(string reason)
+        {
+            try
+            {
+                var hub = EFCore.Instance?.GetSuspectStateHub();
+                if (hub != null && !hub.Is(SuspectState.None))
+                {
+                    hub.ChangeState(SuspectState.None);
+                    ModLog.Info("[CaseManager] Reset suspect state hub to None (" + reason + ")");
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("[CaseManager] ResetEscortPipelineState(state) error: " + ex);
+            }
+        }
+
 
         private void CleanupCase()
         {
@@ -1799,6 +1854,8 @@ namespace EF.PoliceMod
             {
                 EventBus.Publish(new CaseEndedEvent());
             }
+
+            try { ResetEscortPipelineState("CleanupCase"); } catch { }
 
             _caseActive = false;
 
