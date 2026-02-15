@@ -60,12 +60,18 @@ namespace EF.PoliceMod.Gameplay
             EventBus.Subscribe<SuspectFollowRequestEvent>(OnFollowRequested);
             EventBus.Subscribe<EF.PoliceMod.Core.SuspectDeliveredEvent>(OnSuspectDelivered);
             EventBus.Subscribe<DutyEndedEvent>(OnDutyEnded);
+            EventBus.Subscribe<CaseEndedEvent>(OnCaseEnded);
             // EventBus.Subscribe<EF.PoliceMod.Input.PlayerAimedAtPedEvent>(OnPlayerAimedAt); // TEMP 禁用
         }
 
 
         // 如果没有现成方法签名匹配的，新增一个适配方法：
         private void OnDutyEnded(DutyEndedEvent e)
+        {
+            ForceClear();
+        }
+
+        private void OnCaseEnded(CaseEndedEvent e)
         {
             ForceClear();
         }
