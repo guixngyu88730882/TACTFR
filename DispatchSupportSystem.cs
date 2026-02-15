@@ -304,6 +304,15 @@ namespace EF.PoliceMod.Systems
 
                         try
                         {
+                            bool driverInVeh = false;
+                            try { driverInVeh = drv.IsInVehicle(veh); } catch { driverInVeh = false; }
+                            if (!driverInVeh)
+                            {
+                                try { Function.Call(Hash.SET_PED_INTO_VEHICLE, drv.Handle, veh.Handle, -1); } catch { }
+                                try { drv.Task.EnterVehicle(veh, VehicleSeat.Driver); } catch { }
+                                u.IsFollowing = false;
+                                continue;
+                            }
                             try { Function.Call(Hash.SET_VEHICLE_ENGINE_ON, veh.Handle, true, true, false); } catch { }
                             try { Function.Call(Hash.SET_DRIVER_ABILITY, drv.Handle, 1.0f); } catch { }
                             try { Function.Call(Hash.SET_DRIVER_RACING_MODIFIER, drv.Handle, 1.0f); } catch { }

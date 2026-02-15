@@ -526,6 +526,12 @@ namespace EF.PoliceMod.Gameplay
 
         public bool HasSuspect => _currentSuspect != null && _currentSuspect.Exists();
 
+        public bool IsHandleCompliant(int handle)
+        {
+            if (handle <= 0) return false;
+            try { return _compliantSuspects.Contains(handle); } catch { return false; }
+        }
+
         void ISuspectService.ReleaseControl()
         {
             ForceClear();
