@@ -524,6 +524,33 @@ namespace EF.PoliceMod
             return false;
         }
 
+        private void ClearSuspectVisualByHandle(int handle)
+        {
+            if (handle <= 0) return;
+            try
+            {
+                if (_suspect != null && _suspect.Exists() && _suspect.Handle == handle)
+                {
+                    try { if (_suspectBlip != null && _suspectBlip.Exists()) _suspectBlip.Delete(); } catch { }
+                    _suspectBlip = null;
+                    try { ClearSuspectSearchArea(); } catch { }
+                    _suspectLost = false;
+                }
+            }
+            catch { }
+
+            try
+            {
+                if (_suspectHandles != null && _suspectHandles.Count > 1 && _suspectHandles[1] == handle)
+                {
+                    try { if (_secondarySuspectBlip != null && _secondarySuspectBlip.Exists()) _secondarySuspectBlip.Delete(); } catch { }
+                    _secondarySuspectBlip = null;
+                    _secondaryLost = false;
+                }
+            }
+            catch { }
+        }
+
         private void MarkDead(int handle)
         {
             if (handle <= 0) return;
@@ -533,6 +560,7 @@ namespace EF.PoliceMod
                 {
                     if (s == null || s.Handle != handle) continue;
                     s.Status = EF.PoliceMod.Core.CaseSuspectStatus.Dead;
+                    try { ClearSuspectVisualByHandle(handle); } catch { }
                     ModLog.Info($"[CaseManager] MarkDead: handle={handle}");
                     return;
                 }
@@ -1791,6 +1819,23 @@ namespace EF.PoliceMod
             catch { }
         }
 
+        private void ResetEscortPipelineState(string reason)
+        {
+            try
+            {
+                var hub = EFCore.Instance?.GetSuspectStateHub();
+                if (hub != null && !hub.Is(SuspectState.None))
+                {
+                    hub.ChangeState(SuspectState.None);
+                    ModLog.Info("[CaseManager] Reset suspect state hub to None (" + reason + ")");
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("[CaseManager] ResetEscortPipelineState(state) error: " + ex);
+            }
+        }
+
 
         private void CleanupCase()
         {
@@ -1799,6 +1844,8 @@ namespace EF.PoliceMod
             {
                 EventBus.Publish(new CaseEndedEvent());
             }
+
+            try { ResetEscortPipelineState("CleanupCase"); } catch { }
 
             _caseActive = false;
 
