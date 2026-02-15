@@ -403,6 +403,86 @@ namespace EF.PoliceMod.Executors
         }
 
         private int GetSeatIndexForDoorId(int doorId) => VehicleSeatDoorOps.GetSeatIndexForDoorId(doorId);
+
+        private Ped FindPedByHandle(int handle)
+        {
+            if (handle <= 0) return null;
+            try { return World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == handle); } catch { return null; }
+        }
+
+        private void ApplyActionToOtherCompliantCaseSuspects(int currentHandle, Action<Ped> action)
+        {
+            if (action == null) return;
+            try
+            {
+                var mgr = EFCore.Instance?.GetCaseManager();
+                var handles = mgr?.SuspectHandles;
+                if (handles == null) return;
+
+                foreach (var h in handles)
+                {
+                    if (h <= 0 || h == currentHandle) continue;
+                    try
+                    {
+                        if (_suspectController == null || !_suspectController.IsHandleCompliant(h)) continue;
+                        var ped = FindPedByHandle(h);
+                        if (ped == null || !ped.Exists() || ped.IsDead) continue;
+                        action(ped);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
+        private void TryMakeSecondaryFollow(Ped suspect)
+        {
+            if (suspect == null || !suspect.Exists() || suspect.IsDead) return;
+            if (suspect.IsInVehicle()) return;
+            try
+            {
+                if (GetStyle() == ArrestActionStyle.CuffAndLead)
+                {
+                    try { Function.Call(Hash.SET_ENABLE_HANDCUFFS, suspect.Handle, true); } catch { }
+                    try { Function.Call(Hash.SET_ENABLE_BOUND_ANKLES, suspect.Handle, true); } catch { }
+                }
+                SuspectFollowOps.StartFollow(_suspectController, suspect, GetStyle());
+            }
+            catch { }
+        }
+
+        private void TryMakeSecondaryBoard(Ped suspect, Ped player)
+        {
+            if (suspect == null || !suspect.Exists() || suspect.IsDead) return;
+            if (player == null || !player.Exists()) return;
+            if (suspect.IsInVehicle()) return;
+
+            Vehicle targetVeh = null;
+            try
+            {
+                if (player.IsInVehicle()) targetVeh = player.CurrentVehicle;
+                else targetVeh = World.GetNearbyVehicles(player, 6.0f).FirstOrDefault(v => v != null && v.Exists());
+            }
+            catch { targetVeh = null; }
+            if (targetVeh == null || !targetVeh.Exists()) return;
+
+            var seat = FindAvailableSeatForSuspect(targetVeh);
+            if (seat == VehicleSeat.None) return;
+
+            try
+            {
+                int doorIndex = NormalizeDoorIndex(targetVeh, GetDoorIndexForSeat(seat));
+                try { VehicleDoorOps.OpenDoor(targetVeh, doorIndex); } catch { }
+                try { _cuffedDoorFlow.ArmPendingShutDoor(targetVeh.Handle, doorIndex, suspect.Handle, Game.GameTime); } catch { }
+            }
+            catch { }
+
+            try { suspect.Task.ClearAll(); } catch { }
+            try { Function.Call(Hash.SET_ENABLE_HANDCUFFS, suspect.Handle, true); } catch { }
+            try { EnsureCuffedClipset(suspect); } catch { }
+            try { suspect.Task.EnterVehicle(targetVeh, seat, -1, 1.6f); } catch { }
+        }
+
         // 让嫌疑人跟随玩家（调用 native 任务）
         private void MakeSuspectFollow(Ped suspect)
         {
@@ -487,7 +567,7 @@ namespace EF.PoliceMod.Executors
                         var seat2 = FindAvailableSeatForSuspect(nearVeh);
                         if (seat2 == VehicleSeat.None)
                         {
-                            Notification.Show("~y~没有可用座位");
+                            Notification.Show("~y~车辆无空位");
                             return;
                         }
 
@@ -520,6 +600,7 @@ namespace EF.PoliceMod.Executors
                         try { suspect.Task.EnterVehicle(nearVeh, seat2, -1, 1.6f); } catch { }
 
                         _stateHub.ChangeState(SuspectState.EnteringVehicle);
+                        try { ApplyActionToOtherCompliantCaseSuspects(suspect.Handle, p => TryMakeSecondaryBoard(p, player)); } catch { }
                         ModLog.Info("[Escort][Vehicle] CuffAndLead on-foot E -> EnteringVehicle issued");
                         return;
                     }
@@ -565,6 +646,7 @@ namespace EF.PoliceMod.Executors
 
                 // 进入过渡态：只切状态，由 OnStateChanged 统一执行 StartEnterVehicle（避免重复下任务）
                 _stateHub.ChangeState(SuspectState.EnteringVehicle);
+                try { ApplyActionToOtherCompliantCaseSuspects(suspect.Handle, p => TryMakeSecondaryBoard(p, player)); } catch { }
                 ModLog.Info("[Escort][Vehicle] E pressed → EnteringVehicle issued");
 
                 return;
@@ -635,17 +717,7 @@ namespace EF.PoliceMod.Executors
                 // 如果不在车内：切换跟随/取消跟随
                 if (!_isSuspectFollowing || _followingSuspectHandle != suspect.Handle)
                 {
-                    // 逃跑概率：按 G 的瞬间有概率逃跑（车内不触发）
-                    try
-                    {
-                        if (SuspectEscapeOps.TryEscapeOnFollowRequest(_suspectController, _stateHub, suspect, _rand, 0.10))
-                        {
-                            _isSuspectFollowing = false;
-                            _followingSuspectHandle = -1;
-                            return;
-                        }
-                    }
-                    catch { }
+                    // 关闭“受惊逃跑”随机触发：按 G 只负责进入跟随，避免流程被随机打断。
 
                     _isSuspectFollowing = true;
                     _followingSuspectHandle = suspect.Handle;
@@ -665,9 +737,10 @@ namespace EF.PoliceMod.Executors
 
                     // 真正下达“跟随”任务（之前只改了标记，容易出现你说的“按 G 没反应”）
                     try { MakeSuspectFollow(suspect); } catch { }
+                    try { ApplyActionToOtherCompliantCaseSuspects(suspect.Handle, p => TryMakeSecondaryFollow(p)); } catch { }
 
                     ModLog.Info("[Escort][Follow] Suspect set to follow (handle=" + suspect.Handle + ")");
-                    Notification.Show("嫌疑人开始跟随（现在可按 E 让其上车）");
+                    Notification.Show("已下达跟随：所有已拘捕嫌疑人将跟随");
                 }
                 else
                 {
