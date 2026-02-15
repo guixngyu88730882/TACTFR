@@ -247,7 +247,7 @@ namespace EF.PoliceMod.Gameplay
 
                 // 仅“案件嫌疑人”才 TakeControl；巡逻锁定路人不接管，避免污染任务执法链路
                 bool isCaseSuspect = false;
-                try { isCaseSuspect = (_suspect != null && _suspect.Exists() && _currentTarget.Handle == _suspect.Handle); } catch { isCaseSuspect = false; }
+                try { isCaseSuspect = IsHandleInCurrentCase(_currentTarget.Handle); } catch { isCaseSuspect = false; }
                 if (isCaseSuspect)
                 {
                     try
