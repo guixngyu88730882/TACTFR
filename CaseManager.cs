@@ -63,8 +63,8 @@ namespace EF.PoliceMod
         private bool _suspectWasResisting = false;
 
         // --- “丢失”判定（距离版）：只保留“离得太远就丢失” ---
-        private const float LostIfFartherThan = 520f;
-        private const float RecoverIfCloserThan = 220f;
+        private const float LostIfFartherThan = 1400f;
+        private const float RecoverIfCloserThan = 420f;
 
 
         private enum CaseMode
@@ -1263,15 +1263,8 @@ namespace EF.PoliceMod
 
 
             // 1️⃣ 找生成点
+            // 以玩家当前位置为种子，避免“接案后嫌疑人刷在几公里外导致看不到模型/立即丢失”
             Vector3 spawnSeed = player.Position;
-            if (_terminalOptionId >= 0 && _terminalOptionId <= 5)
-            {
-                // 终端地点预设：市区/郊区/偏远（按 optionId 0..2 / 3..5）
-                int region = (_terminalOptionId % 3);
-                if (region == 0) spawnSeed = new Vector3(215.8f, -810.2f, 30.7f);           // 市区（靠近市中心/停车场）
-                else if (region == 1) spawnSeed = new Vector3(-1034.6f, -2733.6f, 20.1f);  // 郊区（机场周边）
-                else spawnSeed = new Vector3(1692.2f, 4782.6f, 41.9f);                      // 偏远（北部小镇）
-            }
 
             // 终端“偏远/郊区/市区”生成距离：把嫌疑人刷远一点，避免太近无聊
             float spawnRadius = 220f;
@@ -1431,6 +1424,9 @@ namespace EF.PoliceMod
             // 5️⃣ 基础行为
             _suspect.IsPersistent = true;
             _suspect.BlockPermanentEvents = true;
+
+            // 新案生成保护期：避免刚开局就因距离判定进入 LOST（导致必须立刻直升机勘探）
+            _suspectRecoverAtMs = Game.GameTime + 45000;
 
             // 新案生成保护期：避免刚开局就因距离判定进入 LOST（导致必须立刻直升机勘探）
             _suspectRecoverAtMs = Game.GameTime + 45000;

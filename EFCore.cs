@@ -277,7 +277,7 @@ namespace EF.PoliceMod
             var _initCaseStatusQuery = EF.PoliceMod.Systems.CaseStatusQuery.HasActiveCase;
             var _initTerminalAccessQuery = EF.PoliceMod.Systems.TerminalAccessQuery.CanOpenTerminal;
 
-            GTA.UI.Notification.Show("5.4.0警察模组加载成功！玩家动力@某宇原创制作 最后更新时间2026/02/12 模组QQ反馈群1079691553");
+            GTA.UI.Notification.Show("5.4.0警察模组加载成功！玩家动力@某宇原创制作 最后更新时间2026/02/15 模组QQ反馈群1079691553");
             ModLog.Info("[EFCore] EF Police Mod v5.4.0 loaded");
             }
             catch (Exception ex)

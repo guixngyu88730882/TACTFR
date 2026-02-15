@@ -267,7 +267,10 @@ namespace EF.PoliceMod.Systems
 
                 CleanupInvalidUnits();
                 CheckPlayerAttackBackup(player);
-                CheckPlayerUnderAttack(player);
+                if (_convoyMode == ConvoyMode.FreeRoam)
+                {
+                    CheckPlayerUnderAttack(player);
+                }
 
                 int now = Game.GameTime;
 
