@@ -15,7 +15,7 @@ namespace EF.PoliceMod.Systems
         private int _lastActionAtMs = 0;
         private const int CooldownMs = 1200;
 
-        private const int FollowUpdateDebounceMs = 400;
+        private const int FollowUpdateDebounceMs = 150;
         private int _lastFollowUpdateAtMs = 0;
         private const int FollowModeDebounceMs = 600;
         private int _lastFollowModeAtMs = 0;

@@ -514,7 +514,7 @@ namespace EF.PoliceMod.Executors
                 return;
             }
 
-            if (suspect.IsDead || suspect.IsRagdoll)
+            if (suspect.IsDead || (suspect.IsRagdoll && !_stateHub.Is(SuspectState.InVehicle)))
             {
                 ModLog.Warn("[Escort][Vehicle] E pressed but suspect not controllable");
                 return;
@@ -576,7 +576,7 @@ namespace EF.PoliceMod.Executors
                         // 近距触发保障
                         try
                         {
-                            if (!IsPlayerNearSuspectInteractionPoint(suspect, player, 0.2f))
+                            if (!IsPlayerNearSuspectInteractionPoint(suspect, player, 1.5f))
                             {
                                 Notification.Show("~y~离嫌疑人太远");
                                 return;
@@ -1079,9 +1079,23 @@ namespace EF.PoliceMod.Executors
         private void ResumeEscortOnFoot()
         {
             ModLog.Info("[Escort][Vehicle] Execute: ResumeEscortOnFoot");
-            // TODO: 恢复押送跟随
-            // Escort 状态下，Follow Executor 会自然接管
+        }
 
+        private Ped TryResolveInteractSuspect(Ped suspect, Ped player)
+        {
+            if (suspect != null && suspect.Exists()) return suspect;
+            var target = _suspectController.GetCurrentSuspect();
+            if (target != null && target.Exists()) return target;
+            return null;
+        }
+
+        private bool IsPlayerNearSuspectInteractionPoint(Ped suspect, Ped player, float threshold)
+        {
+            if (suspect == null || !suspect.Exists() || player == null || !player.Exists())
+                return false;
+            var suspectPos = suspect.Position;
+            var playerPos = player.Position;
+            return suspectPos.DistanceTo(playerPos) <= 1.5f; // 修复：从 0.2f 改为 1.5f，兼容押送时的实际距离
         }
     }
 }
