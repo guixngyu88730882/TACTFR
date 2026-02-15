@@ -451,83 +451,6 @@ namespace EF.PoliceMod.Executors
             catch { }
         }
 
-        private bool IsPlayerNearSuspectInteractionPoint(Ped suspect, Ped player, float extraPadding = 0.0f)
-        {
-            if (suspect == null || !suspect.Exists() || player == null || !player.Exists()) return false;
-
-            float baseDist = VehicleEscortLine.MaxEInteractDistance(GetStyle()) + extraPadding;
-            Vector3 playerPos = player.Position;
-            Vector3 suspectPos = suspect.Position;
-
-            try { if (playerPos.DistanceTo(suspectPos) <= baseDist) return true; } catch { }
-
-            // 被拷状态下增加两个交互点（左右两侧），降低双人案 E 交互失败率。
-            if (GetStyle() != ArrestActionStyle.CuffAndLead) return false;
-
-            try
-            {
-                Vector3 fwd = suspect.ForwardVector;
-                fwd.Z = 0f;
-                float fwdLenSq = (fwd.X * fwd.X) + (fwd.Y * fwd.Y) + (fwd.Z * fwd.Z);
-                if (fwdLenSq < 0.001f) fwd = Game.Player.Character.ForwardVector;
-                fwd.Normalize();
-
-                Vector3 right = new Vector3(fwd.Y, -fwd.X, 0f);
-                Vector3 p1 = suspectPos + right * 1.0f;
-                Vector3 p2 = suspectPos - right * 1.0f;
-                float pointRange = 1.7f + extraPadding;
-
-                if (playerPos.DistanceTo(p1) <= pointRange) return true;
-                if (playerPos.DistanceTo(p2) <= pointRange) return true;
-            }
-            catch { }
-
-            return false;
-        }
-
-        private Ped TryResolveInteractSuspect(Ped current, Ped player)
-        {
-            if (current != null && current.Exists() && !current.IsDead)
-            {
-                if (IsPlayerNearSuspectInteractionPoint(current, player, 0.2f)) return current;
-            }
-
-            try
-            {
-                var mgr = EFCore.Instance?.GetCaseManager();
-                var handles = mgr?.SuspectHandles;
-                if (handles == null) return current;
-
-                Ped best = null;
-                float bestDist = 99999f;
-                foreach (var h in handles)
-                {
-                    if (h <= 0) continue;
-                    if (_suspectController == null || !_suspectController.IsHandleCompliant(h)) continue;
-                    var ped = FindPedByHandle(h);
-                    if (ped == null || !ped.Exists() || ped.IsDead) continue;
-                    if (!IsPlayerNearSuspectInteractionPoint(ped, player, 0.5f)) continue;
-
-                    float d = 99999f;
-                    try { d = ped.Position.DistanceTo(player.Position); } catch { d = 99999f; }
-                    if (d < bestDist)
-                    {
-                        bestDist = d;
-                        best = ped;
-                    }
-                }
-
-                if (best != null && best.Exists())
-                {
-                    try { _suspectController.TakeControl(best); } catch { }
-                    return best;
-                }
-            }
-            catch { }
-
-            return current;
-        }
-
         private void TryMakeSecondaryBoard(Ped suspect, Ped player)
         {
             if (suspect == null || !suspect.Exists() || suspect.IsDead) return;
@@ -548,21 +471,15 @@ namespace EF.PoliceMod.Executors
 
             try
             {
-                if (ShouldAutoDoors(GetStyle()))
-                {
-                    int doorIndex = NormalizeDoorIndex(targetVeh, GetDoorIndexForSeat(seat));
-                    try { VehicleDoorOps.OpenDoor(targetVeh, doorIndex); } catch { }
-                    try { _cuffedDoorFlow.ArmPendingShutDoor(targetVeh.Handle, doorIndex, suspect.Handle, Game.GameTime); } catch { }
-                }
+                int doorIndex = NormalizeDoorIndex(targetVeh, GetDoorIndexForSeat(seat));
+                try { VehicleDoorOps.OpenDoor(targetVeh, doorIndex); } catch { }
+                try { _cuffedDoorFlow.ArmPendingShutDoor(targetVeh.Handle, doorIndex, suspect.Handle, Game.GameTime); } catch { }
             }
             catch { }
 
             try { suspect.Task.ClearAll(); } catch { }
-            if (GetStyle() == ArrestActionStyle.CuffAndLead)
-            {
-                try { Function.Call(Hash.SET_ENABLE_HANDCUFFS, suspect.Handle, true); } catch { }
-                try { EnsureCuffedClipset(suspect); } catch { }
-            }
+            try { Function.Call(Hash.SET_ENABLE_HANDCUFFS, suspect.Handle, true); } catch { }
+            try { EnsureCuffedClipset(suspect); } catch { }
             try { suspect.Task.EnterVehicle(targetVeh, seat, -1, 1.6f); } catch { }
         }
 
