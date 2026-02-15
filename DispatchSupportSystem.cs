@@ -343,8 +343,8 @@ namespace EF.PoliceMod.Systems
                             }
                             else
                             {
-                                Vector3 dest = player.Position;
-                                Function.Call(Hash.TASK_VEHICLE_DRIVE_TO_COORD, drv.Handle, veh.Handle, dest.X, dest.Y, dest.Z, FollowMaxSpeed, 0, veh.Model.Hash, 786603, 6.0f, 3.0f);
+                                // 玩家徒步时使用 FOLLOW 盯玩家实体，比 DriveToCoord 更不容易“原地不动/停在旧坐标”。
+                                Function.Call(Hash.TASK_VEHICLE_FOLLOW, drv.Handle, veh.Handle, player.Handle, FollowMaxSpeed, 786603, 12);
                             }
 
                             // 鍏滃簳锛氭湁鏃?AI 浼?鎵撴柟鍚戠洏浣嗕笉韪╂补闂?锛岃繖閲屽己鍒舵澗鍒硅溅/鍚姩寮曟搸骞剁粰涓€鐐瑰墠杩涢€熷害鎻愮ず

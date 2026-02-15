@@ -56,6 +56,42 @@ namespace EF.PoliceMod.Gameplay
             }
         }
 
+        private bool IsHandleInCurrentCase(int handle)
+        {
+            if (handle <= 0) return false;
+            try
+            {
+                var mgr = EFCore.Instance?.GetCaseManager();
+                if (mgr?.SuspectHandles != null)
+                {
+                    foreach (var h in mgr.SuspectHandles)
+                    {
+                        if (h == handle) return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private int GetCaseSlotIndex(int handle)
+        {
+            if (handle <= 0) return -1;
+            try
+            {
+                var mgr = EFCore.Instance?.GetCaseManager();
+                if (mgr?.SuspectHandles != null)
+                {
+                    for (int i = 0; i < mgr.SuspectHandles.Count; i++)
+                    {
+                        if (mgr.SuspectHandles[i] == handle) return i;
+                    }
+                }
+            }
+            catch { }
+            return -1;
+        }
+
         /// <summary>
         /// CaseManager 在生成嫌疑人后调用
         /// </summary>
@@ -125,18 +161,13 @@ namespace EF.PoliceMod.Gameplay
             if (player == null || !player.Exists())
                 return;
 
-            // 再按一次 L：解除锁定（巡逻/任务都一致）
+            bool hadLockedTarget = false;
             try
             {
-                if (_currentTarget != null && _currentTarget.Exists()
-                    && (_currentState == TargetState.Locked || _currentState == TargetState.Arrested))
-                {
-                    ForceClear();
-                    Notification.Show("~y~已解除锁定");
-                    return;
-                }
+                hadLockedTarget = _currentTarget != null && _currentTarget.Exists()
+                    && (_currentState == TargetState.Locked || _currentState == TargetState.Arrested);
             }
-            catch { }
+            catch { hadLockedTarget = false; }
 
             // 非巡逻：只能锁定“本案嫌疑人”
             if (!_allowLockAnyPed)
@@ -153,6 +184,48 @@ namespace EF.PoliceMod.Gameplay
             {
                 Notification.Show("~y~未找到可锁定的目标");
                 return;
+            }
+
+            // 双嫌疑人链路：已锁定 A 时，瞄到 B 再按 L => 切换锁定而不是直接解锁。
+            if (hadLockedTarget)
+            {
+                try
+                {
+                    if (target.Handle == _currentTarget.Handle)
+                    {
+                        ForceClear();
+                        Notification.Show("~y~已解除锁定");
+                        return;
+                    }
+
+                    bool canSwitch = _allowLockAnyPed || IsHandleInCurrentCase(target.Handle);
+                    if (canSwitch)
+                    {
+                        _currentTarget = target;
+                        _currentState = TargetState.Locked;
+                        _everLocked = true;
+                        _lockPressureTriggered = false;
+
+                        bool isCaseSuspect = false;
+                        try { isCaseSuspect = IsHandleInCurrentCase(target.Handle); } catch { isCaseSuspect = false; }
+                        if (isCaseSuspect)
+                        {
+                            try { _suspectController?.TakeControl(_currentTarget); } catch { }
+                        }
+
+                        int slotIndex = GetCaseSlotIndex(target.Handle);
+                        if (slotIndex >= 0) Notification.Show($"~g~已锁定嫌疑人({slotIndex + 1})");
+                        else Notification.Show(_allowLockAnyPed ? "~g~已锁定目标" : "~g~已锁定嫌疑人");
+
+                        ModLog.Info($"[LockTargetSystem] Switched lock target handle={_currentTarget.Handle} slot={slotIndex}");
+                        return;
+                    }
+
+                    ForceClear();
+                    Notification.Show("~y~已解除锁定");
+                    return;
+                }
+                catch { }
             }
 
             if (!_allowLockAnyPed)
@@ -476,6 +549,7 @@ namespace EF.PoliceMod.Gameplay
         private bool IsExcludedPed(Ped ped)
         {
             if (ped == null || !ped.Exists()) return true;
+            try { if (ped.IsDead) return true; } catch { }
 
             if (EF.PoliceMod.Systems.DutyQuery.IsOnDuty)
             {
