@@ -505,6 +505,8 @@ namespace EF.PoliceMod.Executors
             var suspect = _suspectController.GetCurrentSuspect();
             var player = Game.Player.Character;
 
+            try { suspect = TryResolveInteractSuspect(suspect, player); } catch { }
+
             // 基本有效性检查
             if (suspect == null || !suspect.Exists())
             {
@@ -574,7 +576,7 @@ namespace EF.PoliceMod.Executors
                         // 近距触发保障
                         try
                         {
-                            if (suspect.Position.DistanceTo(player.Position) > 5.0f)
+                            if (!IsPlayerNearSuspectInteractionPoint(suspect, player, 0.2f))
                             {
                                 Notification.Show("~y~离嫌疑人太远");
                                 return;
@@ -631,8 +633,7 @@ namespace EF.PoliceMod.Executors
                 // 近距触发保障（避免远处误触）
                 try
                 {
-                    float maxDist = VehicleEscortLine.MaxEInteractDistance(GetStyle());
-                    if (suspect.Position.DistanceTo(player.Position) > maxDist)
+                    if (!IsPlayerNearSuspectInteractionPoint(suspect, player, 0.2f))
                     {
                         ModLog.Info("[Escort][Vehicle] E pressed but suspect too far");
                         return;

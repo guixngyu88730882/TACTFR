@@ -25,6 +25,20 @@ namespace EF.PoliceMod.Gameplay
         public bool HasTarget => _currentTarget != null && _currentTarget.Exists();
         public bool IsCurrentTargetArrested => _currentState == TargetState.Arrested;
 
+        public bool IsPlayerAimingCurrentTarget()
+        {
+            try
+            {
+                var player = Game.Player.Character;
+                if (player == null || !player.Exists()) return false;
+                if (_currentTarget == null || !_currentTarget.Exists()) return false;
+
+                var aimed = FindPedInFront(player, 10.0f);
+                return aimed != null && aimed.Exists() && aimed.Handle == _currentTarget.Handle;
+            }
+            catch { return false; }
+        }
+
         public LockTargetSystem(SuspectController suspectController)
         {
             _suspectController = suspectController

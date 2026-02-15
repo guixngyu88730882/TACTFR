@@ -823,18 +823,21 @@ namespace EF.PoliceMod
             ModLog.Info("[CaseManager] SuspectDeadEvent received");
             try { MarkDead(deadHandle); } catch { }
 
-            // 视觉与导航清理（仅针对当前主嫌疑人）
+            // 视觉与导航清理（按死亡 handle 精准处理，避免误操作当前存活主嫌疑人）
             try
             {
-                if (_lastKnownSuspect != null && _lastKnownSuspect.Exists())
+                Ped deadPed = null;
+                try { deadPed = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == deadHandle); } catch { deadPed = null; }
+                if (deadPed != null && deadPed.Exists())
                 {
-                    try { Function.Call(Hash.SET_PED_TO_RAGDOLL, _lastKnownSuspect.Handle, 5000, 5000, 0, false, false, false); } catch { }
-                    try { Function.Call(Hash.FREEZE_ENTITY_POSITION, _lastKnownSuspect.Handle, true); } catch { }
+                    try { Function.Call(Hash.CLEAR_PED_TASKS_IMMEDIATELY, deadPed.Handle); } catch { }
+                    try { Function.Call(Hash.SET_PED_TO_RAGDOLL, deadPed.Handle, 5000, 5000, 0, false, false, false); } catch { }
+                    try { Function.Call(Hash.FREEZE_ENTITY_POSITION, deadPed.Handle, true); } catch { }
                 }
             }
             catch (Exception ex)
             {
-                ModLog.Error("[CaseManager] Error during ragdoll/freeze: " + ex);
+                ModLog.Error("[CaseManager] Error during dead-suspect freeze: " + ex);
             }
 
             try { ClearDeliveryRoute(); } catch (Exception ex) { ModLog.Error("[CaseManager] ClearDeliveryRoute error: " + ex); }
