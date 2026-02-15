@@ -38,6 +38,8 @@ namespace EF.PoliceMod.Gameplay
         private Ped _potentialAimedTarget = null; // compatibility placeholder: 防止旧代码引用未声明导致编译错误
 
         private readonly HashSet<int> _busySuspects = new HashSet<int>(); // 存储正在被执行关键任务的 suspect handle
+        private readonly HashSet<int> _compliantSuspects = new HashSet<int>();
+        private readonly HashSet<int> _resistingSuspects = new HashSet<int>();
 
         public struct SuspectCompliantEvent
 {
@@ -181,6 +183,8 @@ namespace EF.PoliceMod.Gameplay
 
             if (_currentSuspect != null && _currentSuspect.Exists())
             {
+                try { _compliantSuspects.Remove(_currentSuspect.Handle); } catch { }
+                try { _resistingSuspects.Remove(_currentSuspect.Handle); } catch { }
                 _currentSuspect = null;
             }
 
@@ -260,10 +264,27 @@ namespace EF.PoliceMod.Gameplay
 
             CurrentArrestStyle = EF.PoliceMod.Core.ArrestActionStyle.CuffAndLead;
 
-            // 关键：切换目标时必须重置“配合/反抗”状态，
-            // 否则上一名嫌疑人的 IsCompliant=true 会被沿用，导致“没拘捕也能按 G 跟随”。
-            IsCompliant = false;
-            IsResisting = false;
+            // 双嫌疑人切换：按句柄恢复该嫌疑人的“已控制/反抗”状态，避免切换后误丢状态。
+            bool compliant = false;
+            bool resisting = false;
+            try { compliant = _compliantSuspects.Contains(ped.Handle); } catch { compliant = false; }
+            try { resisting = _resistingSuspects.Contains(ped.Handle); } catch { resisting = false; }
+
+            if (resisting)
+            {
+                IsResisting = true;
+                IsCompliant = false;
+            }
+            else if (compliant)
+            {
+                IsResisting = false;
+                IsCompliant = true;
+            }
+            else
+            {
+                IsCompliant = false;
+                IsResisting = false;
+            }
 
             // ❌ 5.0.99：TakeControl 只接管“引用”和“状态”，不碰 Ped 行为
 
@@ -276,6 +297,8 @@ namespace EF.PoliceMod.Gameplay
             _currentSuspect = ped;
             IsResisting = false;
             IsCompliant = true;
+            try { _resistingSuspects.Remove(ped.Handle); } catch { }
+            try { _compliantSuspects.Add(ped.Handle); } catch { }
 
             // 逼停/临时顺从：默认按“抱头跟随”处理，避免误上拷/拽着走
             CurrentArrestStyle = EF.PoliceMod.Core.ArrestActionStyle.HandsOnHeadFollow;
@@ -288,6 +311,8 @@ namespace EF.PoliceMod.Gameplay
             _currentSuspect = ped;
             IsResisting = true;
             IsCompliant = false;
+            try { _compliantSuspects.Remove(ped.Handle); } catch { }
+            try { _resistingSuspects.Add(ped.Handle); } catch { }
         }
 
         public void ForceClear()
@@ -299,6 +324,8 @@ namespace EF.PoliceMod.Gameplay
             IsResisting = false;
             _wasShotByPlayer = false;
             _deathEventFired = false;
+            try { _compliantSuspects.Clear(); } catch { }
+            try { _resistingSuspects.Clear(); } catch { }
         }
 
 
@@ -324,6 +351,8 @@ namespace EF.PoliceMod.Gameplay
             // 拘捕成功后：标记为“可押送/已控制”
             IsResisting = false;
             IsCompliant = true;
+            try { _resistingSuspects.Remove(ped.Handle); } catch { }
+            try { _compliantSuspects.Add(ped.Handle); } catch { }
 
             // ✅ 只发布“正确 handle”的事件
             EventBus.Publish(
@@ -365,6 +394,8 @@ namespace EF.PoliceMod.Gameplay
             // 进入反抗：状态应立即反映为“不合规/反抗中”
             IsResisting = true;
             IsCompliant = false;
+            try { if (_currentSuspect != null && _currentSuspect.Exists()) _compliantSuspects.Remove(_currentSuspect.Handle); } catch { }
+            try { if (_currentSuspect != null && _currentSuspect.Exists()) _resistingSuspects.Add(_currentSuspect.Handle); } catch { }
 
             EventBus.Publish(new EF.PoliceMod.Input.SuspectResistEvent(_currentSuspect, player));
 

@@ -487,7 +487,7 @@ namespace EF.PoliceMod.Executors
                         var seat2 = FindAvailableSeatForSuspect(nearVeh);
                         if (seat2 == VehicleSeat.None)
                         {
-                            Notification.Show("~y~没有可用座位");
+                            Notification.Show("~y~车辆无空位");
                             return;
                         }
 
