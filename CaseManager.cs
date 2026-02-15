@@ -1791,6 +1791,23 @@ namespace EF.PoliceMod
             catch { }
         }
 
+        private void ResetEscortPipelineState(string reason)
+        {
+            try
+            {
+                var hub = EFCore.Instance?.GetSuspectStateHub();
+                if (hub != null && !hub.Is(SuspectState.None))
+                {
+                    hub.ChangeState(SuspectState.None);
+                    ModLog.Info("[CaseManager] Reset suspect state hub to None (" + reason + ")");
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("[CaseManager] ResetEscortPipelineState(state) error: " + ex);
+            }
+        }
+
 
         private void CleanupCase()
         {
@@ -1799,6 +1816,8 @@ namespace EF.PoliceMod
             {
                 EventBus.Publish(new CaseEndedEvent());
             }
+
+            try { ResetEscortPipelineState("CleanupCase"); } catch { }
 
             _caseActive = false;
 
