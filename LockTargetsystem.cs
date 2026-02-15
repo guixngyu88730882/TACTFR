@@ -230,9 +230,9 @@ namespace EF.PoliceMod.Gameplay
 
             if (!_allowLockAnyPed)
             {
-                if (target.Handle != _suspect.Handle)
+                if (!IsHandleInCurrentCase(target.Handle))
                 {
-                    Notification.Show("~y~只能锁定嫌疑人");
+                    Notification.Show("~y~只能锁定本案嫌疑人");
                     return;
                 }
             }
@@ -260,8 +260,10 @@ namespace EF.PoliceMod.Gameplay
                     }
                 }
 
-                Notification.Show(_allowLockAnyPed ? "~g~已锁定目标" : "~g~已锁定嫌疑人");
-                ModLog.Info($"[LockTargetSystem] Locked target handle={_currentTarget.Handle} allowAny={_allowLockAnyPed}");
+                int slotIndex = GetCaseSlotIndex(_currentTarget.Handle);
+                if (!_allowLockAnyPed && slotIndex >= 0) Notification.Show($"~g~已锁定嫌疑人({slotIndex + 1})");
+                else Notification.Show(_allowLockAnyPed ? "~g~已锁定目标" : "~g~已锁定嫌疑人");
+                ModLog.Info($"[LockTargetSystem] Locked target handle={_currentTarget.Handle} allowAny={_allowLockAnyPed} slot={slotIndex}");
             }
             catch (Exception ex)
             {

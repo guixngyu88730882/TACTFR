@@ -466,13 +466,14 @@ namespace EF.PoliceMod.Systems
             }
             catch { }
 
-            // 已经拘捕/可押送：直接退出抓捕模式，避免重复循环
+            // 已经拘捕/可押送：自动关闭抓捕模式，避免重复循环
             try
             {
                 var cur = _suspectController?.GetCurrentSuspect();
                 if (cur != null && cur.Exists() && cur.Handle == suspect.Handle && _suspectController.IsCompliant && !_suspectController.IsResisting)
                 {
-                    // 已经控制住：保持抓捕模式开关不变，避免造成“需要关掉才生效/反了”的错觉
+                    _arrestMode = false;
+                    Notification.Show("~g~目标已被控制，抓捕模式已自动关闭");
                     ResetAimTrack();
                     return;
                 }
