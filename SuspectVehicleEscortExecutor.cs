@@ -511,6 +511,7 @@ namespace EF.PoliceMod.Executors
             if (suspect == null || !suspect.Exists())
             {
                 ModLog.Warn("[Escort][Vehicle] E pressed but no current suspect");
+                Notification.Show("~y~当前无可交互嫌疑人（请靠近嫌疑人(1)/(2)）");
                 return;
             }
 
