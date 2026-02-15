@@ -1674,6 +1674,13 @@ namespace EF.PoliceMod
                 Ped s2 = null;
                 try { s2 = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == handle2); } catch { s2 = null; }
                 if (s2 == null || !s2.Exists()) return;
+                if (s2.IsDead)
+                {
+                    try { if (_secondarySuspectBlip != null && _secondarySuspectBlip.Exists()) _secondarySuspectBlip.Delete(); } catch { }
+                    _secondarySuspectBlip = null;
+                    _secondaryLost = false;
+                    return;
+                }
 
                 try { _secondaryLastKnownPos = s2.Position; } catch { }
 
@@ -1717,7 +1724,7 @@ namespace EF.PoliceMod
 
                 Ped nextPed = null;
                 try { nextPed = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == nextHandle); } catch { nextPed = null; }
-                if (nextPed == null || !nextPed.Exists()) return false;
+                if (nextPed == null || !nextPed.Exists() || nextPed.IsDead) return false;
 
                 // 提升为 primary
                 _primarySuspectIndex = 1;

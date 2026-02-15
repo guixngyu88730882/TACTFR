@@ -332,8 +332,18 @@ namespace EF.PoliceMod.Gameplay
             // 允许：已锁定 或 已处于“自动拘捕/已控制”(Arrested) 状态下重新选择拘捕风格（例如驾车逃逸线默认跳过拘捕阶段）
             if (_currentState != TargetState.Locked && _currentState != TargetState.Arrested)
             {
-                Notification.Show("~y~未锁定嫌疑人");
-                return;
+                // 双嫌疑人链路兜底：若目标仍存在但状态意外丢失，自动恢复为 Locked，避免误报“未锁定嫌疑人”。
+                if (_currentTarget != null && _currentTarget.Exists())
+                {
+                    _currentState = TargetState.Locked;
+                    _everLocked = true;
+                    ModLog.Warn("[LockTargetSystem] Recovered lock state before arrest attempt");
+                }
+                else
+                {
+                    Notification.Show("~y~未锁定嫌疑人");
+                    return;
+                }
             }
 
             Ped player = Game.Player.Character;
