@@ -466,16 +466,49 @@ namespace EF.PoliceMod.Systems
             }
             catch { }
 
-            // 已经拘捕/可押送：自动关闭抓捕模式，避免重复循环
+            // 已经拘捕/可押送：检查是否还有其他嫌疑人需要抓捕
             try
             {
                 var cur = _suspectController?.GetCurrentSuspect();
                 if (cur != null && cur.Exists() && cur.Handle == suspect.Handle && _suspectController.IsCompliant && !_suspectController.IsResisting)
                 {
-                    _arrestMode = false;
-                    Notification.Show("~g~目标已被控制，抓捕模式已自动关闭");
-                    ResetAimTrack();
-                    return;
+                    // 尝试寻找下一个未顺从的嫌疑人（双人案件接力）
+                    Ped nextTarget = null;
+                    var mgr = EFCore.Instance?.GetCaseManager();
+                    if (mgr != null && mgr.SuspectHandles != null && mgr.SuspectHandles.Count > 1)
+                    {
+                        foreach (var handle in mgr.SuspectHandles)
+                        {
+                            if (handle == suspect.Handle) continue;
+                            var s2 = Entity.FromHandle(handle) as Ped;
+                            if (s2 != null && s2.Exists() && !s2.IsDead)
+                            {
+                                bool isCuffed = false;
+                                try { isCuffed = Function.Call<bool>(Hash.IS_PED_CUFFED, s2.Handle); } catch { }
+                                if (!isCuffed)
+                                {
+                                    nextTarget = s2;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (nextTarget != null)
+                    {
+                        // 切换目标
+                        _lockTargetSystem?.ForceLock(nextTarget);
+                        ResetAimTrack();
+                        Notification.Show("~b~小队已控制目标，自动转向下一个嫌疑人！");
+                        return;
+                    }
+                    else
+                    {
+                        _arrestMode = false;
+                        Notification.Show("~g~所有目标已被控制，抓捕模式已自动关闭");
+                        ResetAimTrack();
+                        return;
+                    }
                 }
             }
             catch { }
@@ -587,7 +620,8 @@ namespace EF.PoliceMod.Systems
                     try { Function.Call(Hash.SET_ENABLE_BOUND_ANKLES, suspect.Handle, false); } catch { }
 
                     try { _suspectController?.SetResisting(suspect); } catch { }
-                    try { EventBus.Publish(new EF.PoliceMod.Input.SuspectResistEvent(suspect, Game.Player.Character)); } catch { }
+                    // P0-2 Fix: Use unified SuspectResistEvent from Core namespace
+try { EventBus.Publish(new EF.PoliceMod.Core.SuspectResistEvent(suspect, Game.Player.Character)); } catch { }
 
                     // 让小队立刻开火接战（否则会站着发呆）
                     try { if (cuffOfficer != null && cuffOfficer.Exists()) CombatTarget(cuffOfficer, suspect); } catch { }

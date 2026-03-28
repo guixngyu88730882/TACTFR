@@ -10,6 +10,7 @@ public class SuspectOnFootExecutor
     private readonly SuspectController _controller;
     private readonly SuspectStateHub _stateHub;
     private readonly SuspectStyleRegistry _styleRegistry;
+    private readonly EF.PoliceMod.Suspects.SuspectContextRegistry _ctxRegistry;
     private readonly EF.PoliceMod.Suspects.StateHubRouter _hubRouter;
 
     private int _lastFollowReissueMs = 0;
@@ -46,13 +47,8 @@ public class SuspectOnFootExecutor
         try
         {
             var suspect = _controller?.GetCurrentSuspect();
-            if (suspect != null && suspect.Exists() && _styleRegistry != null)
-            {
-                return _styleRegistry.GetStyleOrDefault(
-                    suspect.Handle,
-                    _controller.CurrentArrestStyle
-                );
-            }
+            if (suspect != null && suspect.Exists())
+                return ArrestStyleResolver.GetForHandle(suspect.Handle, _controller, _styleRegistry, _ctxRegistry);
         }
         catch { }
 
@@ -64,11 +60,13 @@ public class SuspectOnFootExecutor
         SuspectController controller,
         SuspectStateHub stateHub,
         SuspectStyleRegistry styleRegistry,
+        EF.PoliceMod.Suspects.SuspectContextRegistry ctxRegistry,
         EF.PoliceMod.Suspects.StateHubRouter hubRouter)
     {
         _controller = controller;
         _stateHub = stateHub;
         _styleRegistry = styleRegistry;
+        _ctxRegistry = ctxRegistry;
         _hubRouter = hubRouter;
 
         _stateHub.OnStateChanged += OnStateChanged;
@@ -432,6 +430,7 @@ public class SuspectOnFootExecutor
         catch { }
     }
 
+    // P0-3 Fix: OnStateChanged now uses per-handle state hub instead of GetCurrentSuspect()
     private void OnStateChanged(SuspectState from, SuspectState to)
     {
         if (_handlingStateChange)
@@ -443,7 +442,22 @@ public class SuspectOnFootExecutor
         _handlingStateChange = true;
         try
         {
-            var suspect = _controller.GetCurrentSuspect();
+            // P0-3 Fix: Get the handle from the active hub instead of GetCurrentSuspect()
+            int handle = GetActiveHub().SuspectHandle;
+            if (handle <= 0)
+            {
+                ModLog.Warn("[SuspectOnFootExecutor] OnStateChanged: No valid suspect handle from hub");
+                return;
+            }
+
+            Ped suspect = null;
+            try { suspect = Entity.FromHandle(handle) as Ped; } catch { }
+            if (suspect == null || !suspect.Exists())
+            {
+                ModLog.Warn($"[SuspectOnFootExecutor] OnStateChanged: Suspect with handle {handle} not found or invalid");
+                return;
+            }
+
             var player = Game.Player.Character;
 
             try { DetachDragIfNeeded(); } catch { }
@@ -457,16 +471,11 @@ public class SuspectOnFootExecutor
             }
             catch { }
 
-            if (suspect == null || !suspect.Exists())
-                return;
-
-            int handle = suspect.Handle;
-
             try
             {
                 if (IsBusyState(from))
                 {
-                    _controller.UnmarkBusy(handle);
+                    _controller.ClearBusy(suspect);
                     ModLog.Info($"[SuspectOnFootExecutor] Unmarked busy for ped={handle} (from {from})");
                 }
             }
@@ -532,7 +541,13 @@ public class SuspectOnFootExecutor
 
             try { Function.Call(Hash.SET_ENABLE_HANDCUFFS, suspect.Handle, style == EF.PoliceMod.Core.ArrestActionStyle.CuffAndLead); } catch { }
 
-            try { Function.Call(Hash.CLEAR_PED_TASKS, suspect.Handle); } catch { }
+            // Only clear tasks for non-cuffed styles.
+            // For CuffAndLead, TASK_FOLLOW_TO_OFFSET overrides without breaking cuff anim.
+            if (style != EF.PoliceMod.Core.ArrestActionStyle.CuffAndLead)
+            {
+                try { Function.Call(Hash.CLEAR_PED_TASKS, suspect.Handle); } catch { }
+            }
+
             try
             {
                 float offY = style == EF.PoliceMod.Core.ArrestActionStyle.CuffAndLead ? -0.9f : -1.35f;
@@ -544,14 +559,14 @@ public class SuspectOnFootExecutor
             catch (Exception exTask)
             {
                 ModLog.Error("[SuspectOnFootExecutor] StartFollow Task call failed: " + exTask);
-                try { _controller.UnmarkBusy(suspect.Handle); } catch { }
+                try { _controller.ClearBusy(suspect); } catch { }
                 return;
             }
         }
         catch (Exception ex)
         {
             ModLog.Error("[SuspectOnFootExecutor] StartFollow crashed: " + ex);
-            try { _controller.UnmarkBusy(suspect.Handle); } catch { }
+            try { _controller.ClearBusy(suspect); } catch { }
         }
     }
 

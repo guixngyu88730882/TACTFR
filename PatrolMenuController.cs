@@ -9,11 +9,15 @@ using Keys = System.Windows.Forms.Keys;
 namespace EF.PoliceMod.Systems
 {
     /// <summary>
-    /// 巡逻模式命令菜单（H 打开）：小键盘 8/2 选择，5 确认，H/Num0 关闭
+    /// 巡逻模式命令菜单（PatrolMenu 键打开）：小键盘 8/2 选择，5 确认，PatrolMenu/Num0 关闭
+    /// P1-2 Fix: Now uses PatrolMenu key binding instead of hardcoded H
     /// </summary>
-    public sealed class PatrolMenuController
+    public sealed class PatrolMenuController : EF.PoliceMod.Core.IUiSession
     {
-        private bool _open = false;
+        // P1-2 Fix: Use UIState as single source of truth
+        public string SessionId => EF.PoliceMod.Core.UIState.PatrolMenuSession;
+        public bool IsOpen => EF.PoliceMod.Core.UIState.IsPatrolMenuOpen;
+        
         private int _selected = 0;
         private int _openedAtMs = 0;
         private int _lastToggleAtMs = 0;
@@ -41,30 +45,76 @@ namespace EF.PoliceMod.Systems
 
         public PatrolMenuController()
         {
-            EventBus.Subscribe<PatrolMenuToggledEvent>(e =>
+            EventBus.Subscribe<PatrolMenuToggledEvent>(HandlePatrolMenuToggled);
+            EventBus.Subscribe<DutyEndedEvent>(HandleDutyEnded);
+        }
+
+        private void HandlePatrolMenuToggled(PatrolMenuToggledEvent e)
+        {
+            if (e.Open)
             {
-                if (e.Open) Open();
-                else Close();
-            });
-            EventBus.Subscribe<DutyEndedEvent>(_ => Close());
+                bool patrolOn = EF.PoliceMod.Systems.PatrolModeQuery.Enabled;
+                bool hasActiveCase = EF.PoliceMod.Systems.CaseStatusQuery.HasActiveCase;
+                var core = EFCore.Instance;
+                bool hasLockedTarget = core != null && core.LockTargetSystem != null && core.LockTargetSystem.HasTarget;
+
+                if (patrolOn && hasLockedTarget && !hasActiveCase)
+                {
+                    Open();
+                }
+            }
+            else
+            {
+                Close();
+            }
+        }
+
+        private void HandleDutyEnded(DutyEndedEvent e)
+        {
+            Close();
+        }
+
+        public void Shutdown()
+        {
+            try { EventBus.Unsubscribe<PatrolMenuToggledEvent>(HandlePatrolMenuToggled); } catch { }
+            try { EventBus.Unsubscribe<DutyEndedEvent>(HandleDutyEnded); } catch { }
+            try { Close(); } catch { }
         }
 
         private void Open()
         {
-            _open = true;
+            // P1-2 Fix: Check if any other UI is open
+            string busyUi = EF.PoliceMod.Core.UIState.GetBusyUiName(SessionId);
+            if (!string.IsNullOrEmpty(busyUi))
+            {
+                Notification.Show($"~y~请先关闭 {busyUi}");
+                return;
+            }
+
+            // P1-2 Fix: Register session with UIState
+            EF.PoliceMod.Core.UIState.RegisterSession(SessionId, this);
+            
+            EF.PoliceMod.Core.UIState.MarkPatrolMenuOpen(Game.GameTime);
             _selected = 0;
             _openedAtMs = Game.GameTime;
         }
 
         private void Close()
         {
-            _open = false;
+            EF.PoliceMod.Core.UIState.MarkPatrolMenuClosed();
             _upHeld = _downHeld = _confirmHeld = _cancelHeld = false;
+        }
+
+        // P1-2 Fix: Implement IUiSession.ForceClose
+        public void ForceClose(string reason)
+        {
+            ModLog.Info($"[PatrolMenu] ForceClose called: {reason}");
+            Close();
         }
 
         public void Tick()
         {
-            if (!_open) return;
+            if (!IsOpen) return;
 
             DrawMenu();
             HandleInput();
@@ -136,8 +186,9 @@ namespace EF.PoliceMod.Systems
             int now = Game.GameTime;
             bool canClose = (now - _openedAtMs) > 250;
 
+            // P1-2 Fix: Use PatrolMenu key binding for cancel instead of ArrestMenu
             bool cancel = IsRawKeyDown(KeyBindings.MenuCancel)
-                || IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.ArrestMenu);
+                || IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.PatrolMenu);
             if (cancel && canClose)
             {
                 if (!_cancelHeld)
@@ -186,8 +237,15 @@ namespace EF.PoliceMod.Systems
             else _confirmHeld = false;
         }
 
+        private int _lastExecuteAtMs = 0;
+        private const int ExecuteDebounceMs = 500;
+
         private void ExecuteSelected()
         {
+            int now = Game.GameTime;
+            if (now - _lastExecuteAtMs < ExecuteDebounceMs) return;
+            _lastExecuteAtMs = now;
+
             switch (_selected)
             {
                 case 0:
@@ -198,6 +256,9 @@ namespace EF.PoliceMod.Systems
                     break;
                 case 2:
                     EventBus.Publish(new PatrolSearchRequestedEvent());
+                    break;
+                case 3:
+                    EventBus.Publish(new PatrolBreathalyzerRequestedEvent());
                     break;
             }
         }

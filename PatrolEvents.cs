@@ -32,6 +32,7 @@ namespace EF.PoliceMod.Core
     /// 请求搜查（可出违禁品/通缉/携枪等）。
     /// </summary>
     public struct PatrolSearchRequestedEvent { }
+    public struct PatrolBreathalyzerRequestedEvent { }
 
 
     /// <summary>

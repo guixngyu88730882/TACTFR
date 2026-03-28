@@ -31,7 +31,7 @@ namespace EF.PoliceMod.Gameplay
         private bool _hasFirearm = false;
 
         // 关闭“瞄准/拘捕时受惊逃跑”随机链路，避免案件流程被随机打断。
-        private const bool DisableFrightenedEscapeOnArrest = true;
+        private const bool DisableFrightenedEscapeOnArrest = false;
 
         // 只读暴露：供 PullOverSystem 等模块做“高危”判定
         public float ResistChance => _resistChance;
@@ -40,9 +40,6 @@ namespace EF.PoliceMod.Gameplay
         // Aim debounce & busy tracking
         private Ped _potentialAimedTarget = null; // compatibility placeholder: 防止旧代码引用未声明导致编译错误
 
-        private readonly HashSet<int> _busySuspects = new HashSet<int>(); // 存储正在被执行关键任务的 suspect handle
-        private readonly HashSet<int> _compliantSuspects = new HashSet<int>();
-        private readonly HashSet<int> _resistingSuspects = new HashSet<int>();
         private ArrestActionStyle _pendingArrestStyle = ArrestActionStyle.CuffAndLead;
         private bool _menuArrestContext = false;
 
@@ -79,26 +76,54 @@ namespace EF.PoliceMod.Gameplay
         }
         private void OnSuspectDelivered(EF.PoliceMod.Core.SuspectDeliveredEvent e)
         {
-            OnSuspectDelivered(); // 调用原实现（如果你喜欢也可以直接把逻辑放进这里）
-        }
+            int deliveredHandle = -1;
+            try { deliveredHandle = e.SuspectHandle; } catch { }
 
-        // OnPlayerAimedAt 已禁用：PlayerAimedAtPedEvent 不再携带 Ped，
-        // 为避免编译错误与潜在运行时风险，这里保留空实现仅记录调用并直接返回。
-        public void OnPlayerAimedAt(EF.PoliceMod.Input.PlayerAimedAtPedEvent evt)
-        {
-            try
+            // Remove delivered handle from tracking sets
+            if (deliveredHandle > 0)
             {
-                // 记录一次调用以便调试（不会访问 evt 中不存在的字段）
-                ModLog.Info("[SuspectController] OnPlayerAimedAt called but aim-driven logic disabled.");
-            }
-            catch (Exception ex)
-            {
-                // 兜底记录，绝不抛出
-                ModLog.Error("[SuspectController] OnPlayerAimedAt (disabled) exception: " + ex);
+                EF.PoliceMod.Systems.SuspectStatusStore.Clear(deliveredHandle);
             }
 
-            return;
+            // Only clear current state if current suspect IS the delivered one.
+            // If TrySwitchToNextPrimary already changed _currentSuspect to suspect 2,
+            // we must NOT wipe it.
+            if (_currentSuspect != null && _currentSuspect.Exists())
+            {
+                if (deliveredHandle > 0 && _currentSuspect.Handle == deliveredHandle)
+                {
+                    // This IS the delivered suspect — clear it
+                    _currentSuspect = null;
+                    CurrentArrestStyle = EF.PoliceMod.Core.ArrestActionStyle.CuffAndLead;
+                    IsCompliant = false;
+                    IsResisting = false;
+                }
+                else
+                {
+                    CurrentArrestStyle = ArrestStyleResolver.GetForHandle(_currentSuspect.Handle, this);
+                }
+            }
+            else
+            {
+                // No current suspect — reset flags anyway
+                CurrentArrestStyle = EF.PoliceMod.Core.ArrestActionStyle.CuffAndLead;
+                IsCompliant = false;
+                IsResisting = false;
+            }
+
+            try { _wasShotByPlayer = false; } catch { }
+            try { _deathEventFired = false; } catch { }
+
+            ModLog.Info($"[SuspectController] OnSuspectDelivered: delivered={deliveredHandle}, " +
+                $"currentSuspect={(_currentSuspect != null && _currentSuspect.Exists() ? _currentSuspect.Handle.ToString() : "null")}");
         }
+
+        // P0-2 Fix: PlayerAimedAtPedEvent has been removed from Input namespace
+        // This method is kept for backward compatibility but does nothing
+        // public void OnPlayerAimedAt(EF.PoliceMod.Input.PlayerAimedAtPedEvent evt)
+        // {
+        //     // Disabled: PlayerAimedAtPedEvent no longer exists
+        // }
         public void OnShotOrDamagedByPlayer()
         {
             // 标记为被击倒情况，等站起后做判断
@@ -189,23 +214,7 @@ namespace EF.PoliceMod.Gameplay
         }
 
 
-        private void OnSuspectDelivered()
-        {
 
-            if (_currentSuspect != null && _currentSuspect.Exists())
-            {
-                try { _compliantSuspects.Remove(_currentSuspect.Handle); } catch { }
-                try { _resistingSuspects.Remove(_currentSuspect.Handle); } catch { }
-                _currentSuspect = null;
-            }
-
-            // 交付/切案后必须复位，否则下一名嫌疑人可能继承上一名的“被拷姿态/跟随任务”
-            try { CurrentArrestStyle = EF.PoliceMod.Core.ArrestActionStyle.CuffAndLead; } catch { }
-            try { IsCompliant = false; } catch { }
-            try { IsResisting = false; } catch { }
-            try { _wasShotByPlayer = false; } catch { }
-            try { _deathEventFired = false; } catch { }
-        }
         public Ped GetCurrentSuspect()
 
         {
@@ -213,6 +222,9 @@ namespace EF.PoliceMod.Gameplay
         }
         public void ReleaseControl(Ped ped)
         {
+            int handle = -1;
+            try { handle = ped != null && ped.Exists() ? ped.Handle : -1; } catch { handle = -1; }
+
             if (_currentSuspect == ped)
             {
                 _currentSuspect = null;
@@ -221,9 +233,11 @@ namespace EF.PoliceMod.Gameplay
                 IsResisting = false;
             }
 
+            if (handle > 0)
+            {
+                EF.PoliceMod.Systems.SuspectStatusStore.Clear(handle);
+            }
 
-
-            
         }
 
 
@@ -245,7 +259,10 @@ namespace EF.PoliceMod.Gameplay
             }
 
             // 🔔 通知行为层：押送正式开始
-            EventBus.Publish(new EF.PoliceMod.Input.SuspectEscortBeginEvent(_currentSuspect, Game.Player.Character));
+            // P0-2 Fix: Use unified SuspectEscortBeginEvent from Core namespace
+            EventBus.Publish(new EF.PoliceMod.Core.SuspectEscortRequestEvent.SuspectEscortBeginEvent(
+                _currentSuspect != null && _currentSuspect.Exists() ? _currentSuspect.Handle : 0,
+                Game.Player.Character != null && Game.Player.Character.Exists() ? Game.Player.Character.Handle : 0));
         }
 
 
@@ -273,13 +290,11 @@ namespace EF.PoliceMod.Gameplay
 
             _currentSuspect = ped;
 
-            CurrentArrestStyle = EF.PoliceMod.Core.ArrestActionStyle.CuffAndLead;
+            CurrentArrestStyle = ArrestStyleResolver.GetForHandle(ped.Handle, this);
 
             // 双嫌疑人切换：按句柄恢复该嫌疑人的“已控制/反抗”状态，避免切换后误丢状态。
-            bool compliant = false;
-            bool resisting = false;
-            try { compliant = _compliantSuspects.Contains(ped.Handle); } catch { compliant = false; }
-            try { resisting = _resistingSuspects.Contains(ped.Handle); } catch { resisting = false; }
+            bool compliant = EF.PoliceMod.Systems.SuspectStatusStore.IsCompliant(ped.Handle);
+            bool resisting = EF.PoliceMod.Systems.SuspectStatusStore.IsResisting(ped.Handle);
 
             if (resisting)
             {
@@ -308,11 +323,11 @@ namespace EF.PoliceMod.Gameplay
             _currentSuspect = ped;
             IsResisting = false;
             IsCompliant = true;
-            try { _resistingSuspects.Remove(ped.Handle); } catch { }
-            try { _compliantSuspects.Add(ped.Handle); } catch { }
+            EF.PoliceMod.Systems.SuspectStatusStore.MarkCompliant(ped.Handle);
 
             // 逼停/临时顺从：默认按“抱头跟随”处理，避免误上拷/拽着走
             CurrentArrestStyle = EF.PoliceMod.Core.ArrestActionStyle.HandsOnHeadFollow;
+            ArrestStyleResolver.SetForHandle(ped.Handle, CurrentArrestStyle);
         }
 
         // 供小队/逼停等系统在“要求拘捕节点”直接切入反抗态
@@ -322,12 +337,16 @@ namespace EF.PoliceMod.Gameplay
             _currentSuspect = ped;
             IsResisting = true;
             IsCompliant = false;
-            try { _compliantSuspects.Remove(ped.Handle); } catch { }
-            try { _resistingSuspects.Add(ped.Handle); } catch { }
+            EF.PoliceMod.Systems.SuspectStatusStore.MarkResisting(ped.Handle);
         }
 
         public void ForceClear()
         {
+            if (_currentSuspect != null && _currentSuspect.Exists() && _currentSuspect.IsAttachedTo(Game.Player.Character))
+            {
+                try { _currentSuspect.Detach(); } catch { }
+            }
+
             _currentSuspect = null;
 
             CurrentArrestStyle = EF.PoliceMod.Core.ArrestActionStyle.CuffAndLead;
@@ -337,8 +356,9 @@ namespace EF.PoliceMod.Gameplay
             IsResisting = false;
             _wasShotByPlayer = false;
             _deathEventFired = false;
-            try { _compliantSuspects.Clear(); } catch { }
-            try { _resistingSuspects.Clear(); } catch { }
+            EF.PoliceMod.Systems.SuspectStatusStore.ClearAll();
+
+            ModLog.Info("[SuspectController] Force cleared all states.");
         }
 
         public void SetPendingArrestStyle(ArrestActionStyle style)
@@ -370,12 +390,12 @@ namespace EF.PoliceMod.Gameplay
 
             // 记录本次拘捕选择的动作风格（后续跟随/上车/下车都以此为准）
             CurrentArrestStyle = _pendingArrestStyle;
+            ArrestStyleResolver.SetForHandle(ped.Handle, CurrentArrestStyle);
 
             // 拘捕成功后：标记为“可押送/已控制”
             IsResisting = false;
             IsCompliant = true;
-            try { _resistingSuspects.Remove(ped.Handle); } catch { }
-            try { _compliantSuspects.Add(ped.Handle); } catch { }
+            EF.PoliceMod.Systems.SuspectStatusStore.MarkCompliant(ped.Handle);
 
             // ✅ 只发布“正确 handle”的事件
             EventBus.Publish(
@@ -417,10 +437,10 @@ namespace EF.PoliceMod.Gameplay
             // 进入反抗：状态应立即反映为“不合规/反抗中”
             IsResisting = true;
             IsCompliant = false;
-            try { if (_currentSuspect != null && _currentSuspect.Exists()) _compliantSuspects.Remove(_currentSuspect.Handle); } catch { }
-            try { if (_currentSuspect != null && _currentSuspect.Exists()) _resistingSuspects.Add(_currentSuspect.Handle); } catch { }
+            try { if (_currentSuspect != null && _currentSuspect.Exists()) EF.PoliceMod.Systems.SuspectStatusStore.MarkResisting(_currentSuspect.Handle); } catch { }
 
-            EventBus.Publish(new EF.PoliceMod.Input.SuspectResistEvent(_currentSuspect, player));
+            // P0-2 Fix: Use unified SuspectResistEvent from Core namespace
+            EventBus.Publish(new EF.PoliceMod.Core.SuspectResistEvent(_currentSuspect, player));
 
 
 
@@ -475,7 +495,7 @@ namespace EF.PoliceMod.Gameplay
             {
                 ModLog.Error("[SuspectController] TryAttemptArrest exception: " + ex);
                 _menuArrestContext = false;
-                try { _busySuspects.Remove(handle); } catch { }
+                try { EF.PoliceMod.Systems.SuspectStatusStore.ClearBusy(handle); } catch { }
                 return false;
             }
         }
@@ -483,26 +503,38 @@ namespace EF.PoliceMod.Gameplay
         // 助手方法（若不存在请添加到 SuspectController）
         public void MarkBusy(int handle)
         {
-            try
-            {
-                if (!_busySuspects.Contains(handle)) _busySuspects.Add(handle);
-            }
-            catch { }
+            if (handle <= 0) return;
+            EF.PoliceMod.Systems.SuspectStatusStore.MarkBusy(handle);
         }
 
         public void UnmarkBusy(int handle)
         {
-            try
-            {
-                if (_busySuspects.Contains(handle)) _busySuspects.Remove(handle);
-            }
-            catch { }
+            if (handle <= 0) return;
+            EF.PoliceMod.Systems.SuspectStatusStore.ClearBusy(handle);
         }
 
-        public bool IsBusy(Ped p)
+        public bool IsBusy(int handle)
         {
-            if (p == null || !p.Exists()) return false;
-            return _busySuspects.Contains(p.Handle);
+            if (handle <= 0) return false;
+            return EF.PoliceMod.Systems.SuspectStatusStore.IsBusy(handle);
+        }
+
+        public void MarkBusy(Ped ped)
+        {
+            if (ped == null || !ped.Exists()) return;
+            EF.PoliceMod.Systems.SuspectStatusStore.MarkBusy(ped.Handle);
+        }
+
+        public void ClearBusy(Ped ped)
+        {
+            if (ped == null || !ped.Exists()) return;
+            EF.PoliceMod.Systems.SuspectStatusStore.ClearBusy(ped.Handle);
+        }
+
+        public bool IsBusy(Ped ped)
+        {
+            if (ped == null || !ped.Exists()) return false;
+            return EF.PoliceMod.Systems.SuspectStatusStore.IsBusy(ped.Handle);
         }
 
         public void Initialize()
@@ -546,7 +578,7 @@ namespace EF.PoliceMod.Gameplay
         public bool IsHandleCompliant(int handle)
         {
             if (handle <= 0) return false;
-            try { return _compliantSuspects.Contains(handle); } catch { return false; }
+            return EF.PoliceMod.Systems.SuspectStatusStore.IsCompliant(handle);
         }
 
         void ISuspectService.ReleaseControl()

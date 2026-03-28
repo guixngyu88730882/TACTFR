@@ -2,6 +2,7 @@ using EF.PoliceMod.Core;
 using EF.PoliceMod.Input;
 using GTA;
 using GTA.Native;
+using GTA.UI;
 using System;
 using Keys = System.Windows.Forms.Keys;
 
@@ -12,24 +13,30 @@ namespace EF.PoliceMod.Systems
     /// - 菜单导航键由 KeyBindings 配置
     /// - F7 或菜单取消键关闭
     /// </summary>
-    public class DispatchMenuController
+    public class DispatchMenuController : EF.PoliceMod.Core.IUiSession
     {
         private readonly DispatchSupportSystem _support;
 
-        private bool _open;
+        // P0-1 Fix: Use UIState as single source of truth
+        public string SessionId => EF.PoliceMod.Core.UIState.DispatchMenuSession;
+        public bool IsOpen => EF.PoliceMod.Core.UIState.IsDispatchMenuOpen;
+        
         private int _lastToggleAtMs;
         private const int ToggleDebounceMs = 250;
         private int _openedAtMs = 0;
 
         private int _selected = 0;
         private int _lastExecuteAtMs = 0;
-        private const int ExecuteDebounceMs = 300;
+        private const int ExecuteDebounceMs = 500;
         private readonly string[] _items = new[]
         {
             "部署钉刺带",
+            "回收所有钉刺带",
             "部署路障",
             "部署雪糕筒",
             "直升机勘探(嫌疑人丢失后可用)",
+            "呼叫K-9警犬",
+            "解散K-9警犬"
         };
 
 
@@ -47,31 +54,59 @@ namespace EF.PoliceMod.Systems
         {
             _support = support;
             EventBus.Subscribe<Open911MenuEvent>(OnOpenRequested);
-            EventBus.Subscribe<DutyEndedEvent>(_ => { try { Close(); } catch { } });
-            EventBus.Subscribe<EF.PoliceMod.Core.SuspectDeliveredEvent>(_ => { try { Close(); } catch { } });
+            EventBus.Subscribe<DutyEndedEvent>(HandleDutyEnded);
+            EventBus.Subscribe<EF.PoliceMod.Core.SuspectDeliveredEvent>(HandleSuspectDelivered);
+        }
+
+        private void HandleDutyEnded(DutyEndedEvent e)
+        {
+            try { Close(); } catch { }
+        }
+
+        private void HandleSuspectDelivered(EF.PoliceMod.Core.SuspectDeliveredEvent e)
+        {
+            try { Close(); } catch { }
         }
 
         private void OnOpenRequested(Open911MenuEvent e)
         {
             ModLog.Info("[DispatchMenu] Toggle requested");
 
+            bool onDuty = false;
+            try { onDuty = EF.PoliceMod.Systems.DutyQuery.IsOnDuty; } catch { onDuty = false; }
+            if (!onDuty)
+            {
+                Notification.Show("~y~请先开始执勤");
+                return;
+            }
+
             int now = Game.GameTime;
             if (now - _lastToggleAtMs < ToggleDebounceMs) return;
             _lastToggleAtMs = now;
 
-            if (_open) Close();
+            if (IsOpen) Close();
             else Open();
         }
 
         private void Open()
         {
-            _open = true;
+            // P0-1 Fix: Check if any other UI is open
+            string busyUi = UIState.GetBusyUiName(UIState.DispatchMenuSession);
+            if (!string.IsNullOrEmpty(busyUi))
+            {
+                Notification.Show($"~y~请先关闭 {busyUi}");
+                return;
+            }
+
+            // P0-1 Fix: Register session with UIState
+            UIState.RegisterSession(UIState.DispatchMenuSession, this);
+            
             UIState.MarkDispatchMenuOpen(Game.GameTime);
             _selected = 0;
             _openedAtMs = Game.GameTime;
 
-            // 防止“按下 F7 打开后，同一帧又被 Tick 判定为 F7 关闭”
-            // 这里不再强制 _closeHeld=true，否则会导致“按一次 F7 打开后按不掉（必须松开再按）”
+            // 防止"按下 F7 打开后，同一帧又被 Tick 判定为 F7 关闭"
+            // 这里不再强制 _closeHeld=true，否则会导致"按一次 F7 打开后按不掉（必须松开再按）"
             _closeHeld = false;
 
             try { Function.Call(Hash.CLEAR_HELP, true); } catch { }
@@ -79,13 +114,19 @@ namespace EF.PoliceMod.Systems
 
         private void Close()
         {
-            _open = false;
             UIState.MarkDispatchMenuClosed();
 
             _upHeld = false;
             _downHeld = false;
             _confirmHeld = false;
             _closeHeld = false;
+        }
+
+        // P0-1 Fix: Implement IUiSession.ForceClose
+        public void ForceClose(string reason)
+        {
+            ModLog.Info($"[DispatchMenu] ForceClose called: {reason}");
+            Close();
         }
 
         private void DrawMenu()
@@ -165,23 +206,38 @@ namespace EF.PoliceMod.Systems
             switch (_selected)
             {
                 case 0:
-                    _support.TryDeploySpikeStrip();
+                    EventBus.Publish(new DeploySpikeStripEvent());
                     break;
                 case 1:
-                    _support.TryDeployRoadblock();
+                    EventBus.Publish(new RemoveSpikeStripEvent());
                     break;
                 case 2:
-                    _support.TryDeployTrafficCones();
+                    _support.TryDeployRoadblock();
                     break;
                 case 3:
+                    _support.TryDeployTrafficCones();
+                    break;
+                case 4:
                     EventBus.Publish(new HeliReconRequestedEvent());
+                    break;
+                case 5:
+                    EventBus.Publish(new SummonK9Event());
+                    break;
+                case 6:
+                    EventBus.Publish(new DismissK9Event());
+                    break;
+                case 7:
+                    EventBus.Publish(new SummonConvoyEvent());
+                    break;
+                case 8:
+                    EventBus.Publish(new DismissConvoyEvent());
                     break;
             }
         }
 
         public void Tick()
         {
-            if (!_open) return;
+            if (!IsOpen) return;
 
             UIState.BeatDispatchMenu(Game.GameTime);
             DrawMenu();
@@ -245,6 +301,8 @@ namespace EF.PoliceMod.Systems
         public void Shutdown()
         {
             try { EventBus.Unsubscribe<Open911MenuEvent>(OnOpenRequested); } catch { }
+            try { EventBus.Unsubscribe<DutyEndedEvent>(HandleDutyEnded); } catch { }
+            try { EventBus.Unsubscribe<EF.PoliceMod.Core.SuspectDeliveredEvent>(HandleSuspectDelivered); } catch { }
             try { Close(); } catch { }
         }
     }

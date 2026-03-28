@@ -50,23 +50,36 @@ namespace EF.PoliceMod.Core
 
                 case SuspectState.Restrained:
                     return to == SuspectState.Escorting
-                        || to == SuspectState.Resisting;
+                        || to == SuspectState.EnteringVehicle
+                        || to == SuspectState.Resisting
+                        || to == SuspectState.None;
 
                 case SuspectState.Escorting:
                     return to == SuspectState.EnteringVehicle
-                        || to == SuspectState.Resisting;
+                        || to == SuspectState.Restrained
+                        || to == SuspectState.Resisting
+                        || to == SuspectState.None;
 
                 case SuspectState.EnteringVehicle:
-                    return to == SuspectState.InVehicle;
+                    return to == SuspectState.InVehicle
+                        || to == SuspectState.Escorting
+                        || to == SuspectState.Restrained
+                        || to == SuspectState.None;
 
                 case SuspectState.InVehicle:
-                    return to == SuspectState.ExitingVehicle;
+                    return to == SuspectState.ExitingVehicle
+                        || to == SuspectState.Escorting
+                        || to == SuspectState.None;
 
                 case SuspectState.ExitingVehicle:
-                    return to == SuspectState.Escorting;
+                    return to == SuspectState.Escorting
+                        || to == SuspectState.InVehicle
+                        || to == SuspectState.Restrained
+                        || to == SuspectState.None;
 
                 case SuspectState.Resisting:
-                    return to == SuspectState.Restrained;
+                    return to == SuspectState.Restrained
+                        || to == SuspectState.None;
 
                 default:
                     return true;

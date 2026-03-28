@@ -13,9 +13,11 @@ namespace EF.PoliceMod.Systems
     /// 2) 要求嫌疑人抱头自己跟随
     /// 小键盘 8/2 选择，5 确认；Backspace 取消。
     /// </summary>
-    public class ArrestMenuController
+    public class ArrestMenuController : EF.PoliceMod.Core.IUiSession
     {
-        private bool _open;
+        // P0-1 Fix: Use UIState as single source of truth
+        public string SessionId => EF.PoliceMod.Core.UIState.ArrestMenuSession;
+        public bool IsOpen => EF.PoliceMod.Core.UIState.IsArrestMenuOpen;
 
         private int _selected = 0;
         private readonly string[] _items = new[]
@@ -32,32 +34,69 @@ namespace EF.PoliceMod.Systems
         public ArrestMenuController()
         {
             EventBus.Subscribe<OpenArrestActionMenuEvent>(OnOpenRequested);
-            EventBus.Subscribe<DutyEndedEvent>(_ => { try { Close(); } catch { } });
-            EventBus.Subscribe<EF.PoliceMod.Core.SuspectDeliveredEvent>(_ => { try { Close(); } catch { } });
+            EventBus.Subscribe<DutyEndedEvent>(HandleDutyEnded);
+            EventBus.Subscribe<EF.PoliceMod.Core.SuspectDeliveredEvent>(HandleSuspectDelivered);
+        }
+
+        private void HandleDutyEnded(DutyEndedEvent e)
+        {
+            try { Close(); } catch { }
+        }
+
+        private void HandleSuspectDelivered(EF.PoliceMod.Core.SuspectDeliveredEvent e)
+        {
+            try { Close(); } catch { }
         }
 
         private void OnOpenRequested(OpenArrestActionMenuEvent e)
         {
-            if (_open) return;
+            var core = EFCore.Instance;
+            bool hasLockedTarget = core != null && core.LockTargetSystem != null && core.LockTargetSystem.HasTarget;
+
+            bool patrolOn = EF.PoliceMod.Systems.PatrolModeQuery.Enabled;
+            bool hasActiveCase = EF.PoliceMod.Systems.CaseStatusQuery.HasActiveCase;
+
+            if (!hasLockedTarget || (patrolOn && !hasActiveCase))
+            {
+                return;
+            }
+
+            if (IsOpen) return;
             Open();
         }
 
         private void Open()
         {
-            _open = true;
+            // P0-1 Fix: Check if any other UI is open
+            string busyUi = UIState.GetBusyUiName(UIState.ArrestMenuSession);
+            if (!string.IsNullOrEmpty(busyUi))
+            {
+                Notification.Show($"~y~请先关闭 {busyUi}");
+                return;
+            }
+
+            // P0-1 Fix: Register session with UIState
+            UIState.RegisterSession(UIState.ArrestMenuSession, this);
+            
             UIState.MarkArrestMenuOpen(Game.GameTime);
             _selected = 0;
         }
 
         private void Close()
         {
-            _open = false;
             UIState.MarkArrestMenuClosed();
 
             _upHeld = false;
             _downHeld = false;
             _confirmHeld = false;
             _closeHeld = false;
+        }
+
+        // P0-1 Fix: Implement IUiSession.ForceClose
+        public void ForceClose(string reason)
+        {
+            ModLog.Info($"[ArrestMenu] ForceClose called: {reason}");
+            Close();
         }
 
         private void DrawMenu()
@@ -100,7 +139,7 @@ namespace EF.PoliceMod.Systems
 
         public void Tick()
         {
-            if (!_open) return;
+            if (!IsOpen) return;
 
             UIState.BeatArrestMenu(Game.GameTime);
             DrawMenu();
@@ -168,6 +207,8 @@ namespace EF.PoliceMod.Systems
         public void Shutdown()
         {
             try { EventBus.Unsubscribe<OpenArrestActionMenuEvent>(OnOpenRequested); } catch { }
+            try { EventBus.Unsubscribe<DutyEndedEvent>(HandleDutyEnded); } catch { }
+            try { EventBus.Unsubscribe<EF.PoliceMod.Core.SuspectDeliveredEvent>(HandleSuspectDelivered); } catch { }
             try { Close(); } catch { }
         }
     }

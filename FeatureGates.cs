@@ -6,9 +6,9 @@ namespace EF.PoliceMod.Core
     /// </summary>
     public static class FeatureGates
     {
-        public const bool EnableDualSuspectCase = false;
+        public const bool EnableDualSuspectCase = true;
         public const bool EnableF7Convoy = false;
         public const bool EnableF7DispatchMenu = true;
-        public const bool EnablePerHandleStateHub = false;
+        public const bool EnablePerHandleStateHub = true;
     }
 }

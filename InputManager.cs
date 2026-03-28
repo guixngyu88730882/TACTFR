@@ -33,7 +33,7 @@ namespace EF.PoliceMod.Input
         private const int AIM_PUBLISH_MIN_INTERVAL_MS = 200;
 
         private DateTime _lastTerminalToggle = DateTime.MinValue;
-        private readonly TimeSpan _terminalDebounce = TimeSpan.FromMilliseconds(220);
+        private readonly TimeSpan _terminalDebounce = TimeSpan.FromMilliseconds(800); // Fix: 加长冷却时间防止重入
 
         private bool IsRawKeyDown(System.Windows.Forms.Keys k)
         {
@@ -51,29 +51,22 @@ namespace EF.PoliceMod.Input
             int now = Game.GameTime;
             try { EF.PoliceMod.Core.UIState.AutoRecover(now); } catch { }
 
-            bool pressedO = IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.OpenTerminal) || IsRawKeyDown(System.Windows.Forms.Keys.OemQuestion);
+            bool anyUiOpen = EF.PoliceMod.Core.UIState.IsAnyUiOpen;
+
+            bool pressedO = IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.OpenTerminal);
             bool pressedT = IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.VehicleTerminal);
 
-            bool patrolMenuHotkey = IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.ArrestMenu);
+            bool patrolMenuHotkey = IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.PatrolMenu);
             if (patrolMenuHotkey)
             {
                 if (!_yHeldRaw)
                 {
                     _yHeldRaw = true;
-                    try
+                    if (!anyUiOpen)
                     {
-                        bool patrolOn = EF.PoliceMod.Systems.PatrolModeQuery.Enabled;
-                        bool hasActiveCase = EF.PoliceMod.Systems.CaseStatusQuery.HasActiveCase;
-                        var core = EFCore.Instance;
-                        bool hasLockedTarget = core != null && core.LockTargetSystem != null && core.LockTargetSystem.HasTarget;
-
-                        if (patrolOn && hasLockedTarget && !hasActiveCase)
-                        {
-                            EventBus.Publish(new EF.PoliceMod.Core.PatrolMenuToggledEvent(true));
-                            ModLog.Info("[Input] H pressed -> PatrolMenu opened");
-                        }
+                        EventBus.Publish(new EF.PoliceMod.Core.PatrolMenuToggledEvent(true));
+                        ModLog.Info("[Input] Patrol menu hotkey pressed");
                     }
-                    catch { }
                 }
             }
             else
@@ -81,52 +74,42 @@ namespace EF.PoliceMod.Input
                 _yHeldRaw = false;
             }
 
-            if (pressedO || pressedT)
+            bool terminalKeyDown = pressedO || pressedT;
+
+            if (EF.PoliceMod.Core.UIState.IsPoliceTerminalOpen)
+            {
+                _openTerminalHeld = terminalKeyDown;
+
+                try
+                {
+                    Function.Call(GTA.Native.Hash.DISABLE_ALL_CONTROL_ACTIONS, 0);
+                }
+                catch { }
+
+                return;
+            }
+            else if (terminalKeyDown)
             {
                 if (!_openTerminalHeld)
                 {
                     _openTerminalHeld = true;
-                    if (DateTime.UtcNow - _lastTerminalToggle > _terminalDebounce)
+
+                    if (!anyUiOpen)
                     {
-                        _lastTerminalToggle = DateTime.UtcNow;
-                        bool allow = true;
-                        try
+                        if (DateTime.UtcNow - _lastTerminalToggle > _terminalDebounce)
                         {
-                            var player = Game.Player.Character;
-                            bool inVehicle = player != null && player.Exists() && player.IsInVehicle();
-                            bool onDuty = EF.PoliceMod.Systems.DutyQuery.IsOnDuty;
+                            _lastTerminalToggle = DateTime.UtcNow;
 
-                            if (pressedT)
-                            {
-                                allow = onDuty && inVehicle;
-                                ModLog.Info($"[Input] T pressed: onDuty={onDuty}, inVehicle={inVehicle}, allow={allow}");
-                                if (!allow)
-                                {
-                                    if (!onDuty)
-                                        Notification.Show("~y~车载终端：需先开始执勤");
-                                    else if (!inVehicle)
-                                        Notification.Show("~y~车载终端：需坐入车辆内");
-                                }
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            ModLog.Error("[Input] T key check failed: " + ex);
-                        }
+                            var src = pressedT ? EF.PoliceMod.Input.OpenPoliceTerminalSource.VehicleTerminal : EF.PoliceMod.Input.OpenPoliceTerminalSource.StationTerminal;
 
-                        if (allow)
-                        {
                             try
                             {
-                                var src = pressedT
-                                    ? EF.PoliceMod.Input.OpenPoliceTerminalSource.VehicleTerminal
-                                    : EF.PoliceMod.Input.OpenPoliceTerminalSource.StationTerminal;
                                 EventBus.Publish(new OpenPoliceTerminalEvent(src));
                                 ModLog.Info($"[Input] OpenPoliceTerminalEvent published, source={src}");
                             }
-                            catch
+                            catch (Exception ex)
                             {
-                                EventBus.Publish(new OpenPoliceTerminalEvent(EF.PoliceMod.Input.OpenPoliceTerminalSource.StationTerminal));
+                                ModLog.Error("[Input] Failed to publish OpenPoliceTerminalEvent: " + ex);
                             }
                         }
                     }
@@ -170,40 +153,20 @@ namespace EF.PoliceMod.Input
                 _lastAimedPublishedAtMs = now;
             }
 
-            try
+            if (IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.ArrestMenu))
             {
-                var core = EFCore.Instance;
-                bool hasLockedTarget = core != null && core.LockTargetSystem != null && core.LockTargetSystem.HasTarget;
-
-                bool patrolOn = EF.PoliceMod.Systems.PatrolModeQuery.Enabled;
-                bool hasActiveCase = EF.PoliceMod.Systems.CaseStatusQuery.HasActiveCase;
-
-                bool openArrestMenu = IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.ArrestMenu)
-                    && hasLockedTarget
-                    && (!patrolOn || hasActiveCase);
-
-                if (openArrestMenu)
+                if (!_hHeldRaw)
                 {
-                    if (!_hHeldRaw)
-                    {
-                        _hHeldRaw = true;
-                        EventBus.Publish(new OpenArrestActionMenuEvent());
-                    }
-                }
-                else
-                {
-                    _hHeldRaw = false;
+                    _hHeldRaw = true;
+                    EventBus.Publish(new OpenArrestActionMenuEvent());
                 }
             }
-            catch (Exception ex)
+            else
             {
-                ModLog.Error("[Input] Error while evaluating H-arrest path: " + ex);
-                _arrestKeyHeld = false;
+                _hHeldRaw = false;
             }
 
-            if (Game.Player.Character.IsShooting)
-            {
-            }
+
 
             if (IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.DispatchMenu) || IsRawKeyDown(System.Windows.Forms.Keys.F7))
             {
@@ -217,16 +180,7 @@ namespace EF.PoliceMod.Input
                     }
                     else
                     {
-                        bool onDuty = false;
-                        try { onDuty = EF.PoliceMod.Systems.DutyQuery.IsOnDuty; } catch { onDuty = false; }
-                        if (!onDuty)
-                        {
-                            Notification.Show("~y~请先开始执勤");
-                        }
-                        else
-                        {
-                            EventBus.Publish(new Open911MenuEvent());
-                        }
+                        EventBus.Publish(new Open911MenuEvent());
                     }
                 }
             }
@@ -235,40 +189,12 @@ namespace EF.PoliceMod.Input
                 _dispatchMenuHeld = false;
             }
 
-            if (EF.PoliceMod.Core.UIState.IsPoliceTerminalOpen
-                || EF.PoliceMod.Core.UIState.IsDispatchMenuOpen
-                || EF.PoliceMod.Core.UIState.IsArrestMenuOpen
-                || EF.PoliceMod.Core.UIState.IsUniformMenuOpen
-                || EF.PoliceMod.Core.UIState.IsOfficerSquadMenuOpen)
-            {
-                return;
-            }
-
             if (IsRawKeyDown(EF.PoliceMod.Core.KeyBindings.EscortRequest))
             {
                 if (!_gHeldRaw)
                 {
                     _gHeldRaw = true;
-
-                    bool gOk = false;
-                    try
-                    {
-                        var core = EFCore.Instance;
-                        gOk = core != null
-                            && core.LockTargetSystem != null
-                            && core.LockTargetSystem.HasTarget
-                            && core.LockTargetSystem.IsCurrentTargetArrested;
-                    }
-                    catch { }
-
-                    if (gOk)
-                    {
-                        EventBus.Publish(new SuspectFollowRequestEvent());
-                    }
-                    else
-                    {
-                        Notification.Show("~y~需要先锁定并拘捕嫌疑人（L 锁定，H 菜单拘捕）");
-                    }
+                    EventBus.Publish(new SuspectFollowRequestEvent());
                 }
             }
             else
@@ -295,17 +221,7 @@ namespace EF.PoliceMod.Input
                 if (!_unlockHeld)
                 {
                     _unlockHeld = true;
-                    try
-                    {
-                        var core = EFCore.Instance;
-                        var lts = core != null ? core.LockTargetSystem : null;
-                        if (lts != null && lts.HasTarget && lts.IsPlayerAimingCurrentTarget())
-                        {
-                            EventBus.Publish(new LockTargetClearRequestedEvent());
-                            Notification.Show("~y~已解除锁定");
-                        }
-                    }
-                    catch { }
+                    EventBus.Publish(new LockTargetClearRequestedEvent());
                 }
             }
             else
@@ -334,18 +250,7 @@ namespace EF.PoliceMod.Input
                 if (!_f8Held)
                 {
                     _f8Held = true;
-
-                    bool onDuty = false;
-                    try { onDuty = EF.PoliceMod.Systems.DutyQuery.IsOnDuty; } catch { onDuty = false; }
-
-                    if (onDuty)
-                    {
-                        EventBus.Publish(new OpenOfficerSquadMenuEvent());
-                    }
-                    else
-                    {
-                        Notification.Show("~y~请先开始执勤");
-                    }
+                    EventBus.Publish(new OpenOfficerSquadMenuEvent());
                 }
             }
             else
@@ -358,91 +263,8 @@ namespace EF.PoliceMod.Input
                 if (!_pullOverHeld)
                 {
                     _pullOverHeld = true;
-
                     ModLog.Info("[Input] I pressed (pull over)");
-
-                    if (isAiming)
-                    {
-                        bool ok = false;
-                        try
-                        {
-                            var core = EFCore.Instance;
-                            var lts = core != null ? core.LockTargetSystem : null;
-                            var suspect = lts != null ? (lts.CurrentTarget ?? lts.CurrentSuspect) : null;
-
-                            if (suspect == null || !suspect.Exists())
-                            {
-                                Notification.Show("~y~当前没有可逼停的嫌疑人");
-                                ok = false;
-                            }
-                            else
-                            {
-                                var player = Game.Player.Character;
-
-                                if (player != null && player.Exists())
-                                {
-                                    float dist = 9999f;
-                                    try { dist = player.Position.DistanceTo(suspect.Position); } catch { dist = 9999f; }
-
-                                    if (dist <= 220f)
-                                    {
-                                        RaycastResult rayVeh = World.Raycast(
-                                            GameplayCamera.Position,
-                                            GameplayCamera.Position + GameplayCamera.Direction * 280f,
-                                            IntersectFlags.Vehicles,
-                                            player
-                                        );
-
-                                        var hitVeh = rayVeh.DidHit ? (rayVeh.HitEntity as Vehicle) : null;
-                                        if (hitVeh != null && hitVeh.Exists())
-                                        {
-                                            Vehicle suspectVeh = null;
-                                            try { suspectVeh = suspect.CurrentVehicle; } catch { suspectVeh = null; }
-
-                                            if (suspectVeh != null && suspectVeh.Exists() && hitVeh.Handle == suspectVeh.Handle)
-                                                ok = true;
-                                            else
-                                            {
-                                                try
-                                                {
-                                                    var driver = hitVeh.GetPedOnSeat(VehicleSeat.Driver);
-                                                    if (driver != null && driver.Exists() && driver.Handle == suspect.Handle)
-                                                        ok = true;
-                                                }
-                                                catch { }
-                                            }
-                                        }
-                                    }
-                                }
-
-                                try
-                                {
-                                    if (!ok && lts != null && lts.HasTarget && lts.CurrentTarget != null && lts.CurrentTarget.Exists() && lts.CurrentTarget.Handle == suspect.Handle)
-                                        ok = true;
-                                }
-                                catch { }
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            ModLog.Error("[Input] Pull over check failed: " + ex);
-                            ok = false;
-                        }
-
-                        if (ok)
-                        {
-                            ModLog.Info("[Input] PullOverRequestedEvent published");
-                            EventBus.Publish(new EF.PoliceMod.Core.PullOverRequestedEvent());
-                        }
-                        else
-                        {
-                            Notification.Show("~y~请把准星对准嫌疑车辆再按 I（距离太远也不行）");
-                        }
-                    }
-                    else
-                    {
-                        Notification.Show("~y~请先瞄准嫌疑车辆再按 I 逼停");
-                    }
+                    EventBus.Publish(new EF.PoliceMod.Core.PullOverRequestedEvent(isAiming));
                 }
             }
             else

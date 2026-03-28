@@ -33,7 +33,7 @@ namespace EF.PoliceMod.Executors
                 // 对“被拷线/已上拷”的嫌疑人，按 G 不应再触发逃跑概率，否则会把 G->E 整条链路打断。
                 try
                 {
-                    if (suspectController.CurrentArrestStyle == ArrestActionStyle.CuffAndLead)
+                    if (ArrestStyleResolver.GetForHandle(suspect.Handle, suspectController) == ArrestActionStyle.CuffAndLead)
                         return false;
                 }
                 catch { }

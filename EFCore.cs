@@ -39,6 +39,16 @@ namespace EF.PoliceMod
             return _suspectController;
         }
 
+        public EF.PoliceMod.Core.SuspectStyleRegistry GetSuspectStyleRegistry()
+        {
+            return _suspectStyleRegistry;
+        }
+
+        public EF.PoliceMod.Suspects.SuspectContextRegistry GetSuspectContextRegistry()
+        {
+            return _suspectCtxRegistry;
+        }
+
         public LockTargetSystem LockTargetSystem { get; private set; }
         public StateMachine<OfficerState> OfficerStateMachine { get; private set; }
         private DutyLifecycleController _dutyController;
@@ -78,6 +88,9 @@ namespace EF.PoliceMod
         private EF.PoliceMod.Systems.DutyStateService _dutyState;
 
         private EF.PoliceMod.Systems.PlayerRespawnFixSystem _respawnFix;
+        private EF.PoliceMod.Systems.SpikeStripSystem _spikeSystem;
+        private EF.PoliceMod.Systems.K9System _k9System;
+        private EF.PoliceMod.Systems.ConvoySystem _convoySystem;
 
 
         // Step4：每嫌疑人 StateHub 的准备工作（Router + ContextRegistry）
@@ -172,6 +185,7 @@ namespace EF.PoliceMod
                 _suspectController,
                 _suspectStateHub,
                 _suspectStyleRegistry,
+                _suspectCtxRegistry,
                 _stateHubRouter
             );
 
@@ -180,18 +194,26 @@ namespace EF.PoliceMod
             // —— 确保 SuspectResistEvent 被订阅 ——
             // 当有人发布 SuspectResistEvent 且目标是当前被控制嫌疑人，
             // 我们把 SuspectState 切到 Resisting，交给 Executor 执行行为。
-            EventBus.Subscribe<EF.PoliceMod.Input.SuspectResistEvent>(e =>
+            // P0-2 Fix: Use unified SuspectResistEvent from Core namespace
+            EventBus.Subscribe<EF.PoliceMod.Core.SuspectResistEvent>(e =>
             {
                 try
                 {
-                    if (e.Suspect == null || !e.Suspect.Exists())
+                    // P0-2 Fix: Support both Ped and Handle properties
+                    Ped eventSuspect = e.Suspect;
+                    if (eventSuspect == null && e.SuspectHandle > 0)
+                    {
+                        try { eventSuspect = Entity.FromHandle(e.SuspectHandle) as Ped; } catch { }
+                    }
+                    
+                    if (eventSuspect == null || !eventSuspect.Exists())
                     {
                         ModLog.Info("[EFCore] SuspectResistEvent ignored: event suspect invalid");
                         return;
                     }
 
                     var current = _suspectController.GetCurrentSuspect();
-                    if (current == null || !current.Exists() || current.Handle != e.Suspect.Handle)
+                    if (current == null || !current.Exists() || current.Handle != eventSuspect.Handle)
                     {
                         ModLog.Info("[EFCore] SuspectResistEvent ignored: not matching current suspect");
                         return;
@@ -201,6 +223,9 @@ namespace EF.PoliceMod
                     try { _suspectController.UnmarkBusy(current.Handle); } catch { }
 
                     int h = current.Handle;
+
+                    EnsureSuspectContext(h);
+
                     var hub = _stateHubRouter?.GetWriterHubFor(h, SuspectState.Resisting) ?? _suspectStateHub;
                     if (hub.Is(SuspectState.Resisting))
                     {
@@ -232,14 +257,21 @@ namespace EF.PoliceMod
 
             // 事件 → 状态 映射：把 gameplay 事件映射为 SuspectStateHub 的状态变更
             // 这样：SuspectEscortBeginEvent 发布后，状态机会进入 Escorting，从而触发 OnFootExecutor 的 StartFollow
-            EventBus.Subscribe<EF.PoliceMod.Input.SuspectEscortBeginEvent>(_ =>
+            // P0-2 Fix: Use unified SuspectEscortBeginEvent from Core namespace
+            EventBus.Subscribe<EF.PoliceMod.Core.SuspectEscortRequestEvent.SuspectEscortBeginEvent>(e =>
             {
-                // Step4d-1（准备）：Escorting 状态写入走 Router（默认 gate 关闭 => 仍写 legacy）
-                int h = -1;
-                try { h = LockTargetSystem != null && LockTargetSystem.CurrentTarget != null && LockTargetSystem.CurrentTarget.Exists() ? LockTargetSystem.CurrentTarget.Handle : -1; } catch { h = -1; }
+                // P0-2 Fix: Use event's suspect handle instead of CurrentTarget
+                int h = e.SuspectHandle;
+                if (h <= 0)
+                {
+                    try { h = LockTargetSystem != null && LockTargetSystem.CurrentTarget != null && LockTargetSystem.CurrentTarget.Exists() ? LockTargetSystem.CurrentTarget.Handle : -1; } catch { h = -1; }
+                }
+                
+                EnsureSuspectContext(h);
+
                 try { _stateHubRouter?.GetWriterHubFor(h, SuspectState.Escorting)?.ChangeState(SuspectState.Escorting); }
                 catch { _suspectStateHub.ChangeState(SuspectState.Escorting); }
-                ModLog.Info("[EFCore] Event -> State: SuspectEscortBeginEvent -> Escorting");
+                ModLog.Info($"[EFCore] Event -> State: SuspectEscortBeginEvent -> Escorting (handle={h})");
 
             });
 
@@ -262,6 +294,8 @@ namespace EF.PoliceMod
                         }
                     }
                     catch { h = -1; }
+
+                    EnsureSuspectContext(h);
 
                     var hub = _stateHubRouter?.GetWriterHubFor(h, SuspectState.Restrained) ?? _suspectStateHub;
                     hub.ChangeState(SuspectState.Restrained);
@@ -301,6 +335,9 @@ namespace EF.PoliceMod
 
             // 切模型后死亡无法重生：稳定兜底
             _respawnFix = new EF.PoliceMod.Systems.PlayerRespawnFixSystem();
+            _spikeSystem = new EF.PoliceMod.Systems.SpikeStripSystem();
+            _k9System = new EF.PoliceMod.Systems.K9System();
+            _convoySystem = new EF.PoliceMod.Systems.ConvoySystem();
 
             // I 键逼停（嫌疑人驾车逃逸）—— 必须保存实例并在 OnTick 驱动 TickUpdate，否则停稳检测不会更新
             _pullOverSystem = new EF.PoliceMod.Systems.PullOverSystem(_suspectController);
@@ -385,20 +422,33 @@ namespace EF.PoliceMod
             {
                 EventBus.Subscribe<EF.PoliceMod.Core.SuspectArrestStyleSelectedEvent>(e =>
                 {
-                    try { _suspectStyleRegistry?.SetStyle(e.SuspectHandle, e.Style); } catch { }
-                    if (FeatureGates.EnablePerHandleStateHub)
+                    ArrestStyleResolver.SetForHandle(e.SuspectHandle, e.Style, _suspectStyleRegistry, _suspectCtxRegistry);
+                    EnsureSuspectContext(e.SuspectHandle);
+                });
+
+                EventBus.Subscribe<EF.PoliceMod.Core.SuspectHandleListChangedEvent>(e =>
+                {
+                    try
                     {
-                        try
+                        var handles = e.Handles;
+                        if (handles == null) return;
+                        foreach (var h in handles)
                         {
-                            var ctx = _suspectCtxRegistry.GetOrCreate(e.SuspectHandle);
-                            if (ctx != null && ctx.StateHub != null)
-                            {
-                                _suspectVehicleEscortExecutor?.SubscribeToPerHandleHub(ctx.StateHub);
-                                _suspectOnFootExecutor?.SubscribeToPerHandleHub(ctx.StateHub);
-                            }
+                            EnsureSuspectContext(h);
                         }
-                        catch { }
+                        ModLog.Info($"[EFCore] SuspectHandleListChanged: ensured {handles.Count} contexts");
                     }
+                    catch { }
+                });
+
+                EventBus.Subscribe<EF.PoliceMod.Core.SuspectDeliveredEvent>(e =>
+                {
+                    try { ArrestStyleResolver.ClearForHandle(e.SuspectHandle, _suspectStyleRegistry, _suspectCtxRegistry); } catch { }
+                });
+
+                EventBus.Subscribe<EF.PoliceMod.Core.CaseEndedEvent>(_ =>
+                {
+                    try { ArrestStyleResolver.ClearAll(_suspectStyleRegistry, _suspectCtxRegistry); } catch { }
                 });
             }
             catch { }
@@ -438,13 +488,14 @@ namespace EF.PoliceMod
             var _initCaseStatusQuery = EF.PoliceMod.Systems.CaseStatusQuery.HasActiveCase;
             var _initTerminalAccessQuery = EF.PoliceMod.Systems.TerminalAccessQuery.CanOpenTerminal;
 
-            GTA.UI.Notification.Show("5.4.0-TACTFR警察模组加载成功！玩家动力@某宇原创制作 最后更新时间2026/03/07，模组QQ反馈群1079691553");
-            ModLog.Info("[EFCore] EF Police Mod v5.4.0 loaded");
+            _bannerEndTime = Game.GameTime + 6000; // 停留6秒
+            GTA.UI.Notification.Show("~b~[TACTFR]~s~ TACTFR警察模组v5.6.0已成功加载！");
+            ModLog.Info("[EFCore] EF Police Mod v5.6.0 loaded");
             }
             catch (Exception ex)
             {
                 try { ModLog.Error("[EFCore] Constructor failed: " + ex); } catch { }
-                try { GTA.UI.Notification.Show("~r~警察模组初始化失败，已写入 EF_PoliceMod.log"); } catch { }
+                try { GTA.UI.Notification.Show("~r~警察模组初始化失败，已写入 TACTFR.log"); } catch { }
             }
         }
 
@@ -474,6 +525,8 @@ namespace EF.PoliceMod
 
         private int _lastWantedEnforceAtMs = 0;
         private const int WantedEnforceIntervalMs = 750;
+
+        private int _bannerEndTime = 0;
 
         private void EnableLawAuthority()
         {
@@ -522,9 +575,45 @@ namespace EF.PoliceMod
             return _suspectStateHub;
         }
 
+        private void EnsureSuspectContext(int handle)
+        {
+            if (handle <= 0) return;
+            if (!FeatureGates.EnablePerHandleStateHub) return;
+
+            try
+            {
+                var ctx = _suspectCtxRegistry.GetOrCreate(handle);
+                if (ctx == null || ctx.StateHub == null) return;
+
+                _suspectVehicleEscortExecutor?.SubscribeToPerHandleHub(ctx.StateHub);
+                _suspectOnFootExecutor?.SubscribeToPerHandleHub(ctx.StateHub);
+                ModLog.Info($"[EFCore] EnsureSuspectContext: handle={handle} context ready");
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("[EFCore] EnsureSuspectContext failed: " + ex);
+            }
+        }
+
         private void OnTick(object sender, EventArgs e)
         {
             Ped player = Game.Player.Character;
+
+            if (Game.GameTime < _bannerEndTime)
+            {
+                try
+                {
+                    Function.Call(Hash.SET_TEXT_FONT, 0);
+                    Function.Call(Hash.SET_TEXT_SCALE, 0.65f, 0.65f);
+                    Function.Call(Hash.SET_TEXT_CENTRE, true);
+                    Function.Call(Hash.SET_TEXT_COLOUR, 80, 180, 255, 255);
+                    Function.Call(Hash.SET_TEXT_DROPSHADOW, 2, 0, 0, 0, 255);
+                    Function.Call(Hash.BEGIN_TEXT_COMMAND_DISPLAY_TEXT, "STRING");
+                    Function.Call(Hash.ADD_TEXT_COMPONENT_SUBSTRING_PLAYER_NAME, "TACTFR 警察模组v5.6.0已加载，更新日期2026/03/26 粉丝二群1061632354");
+                    Function.Call(Hash.END_TEXT_COMMAND_DISPLAY_TEXT, 0.5f, 0.15f);
+                }
+                catch { }
+            }
 
             // 玩家死亡时由 DutyLifecycleController / PlayerRespawnFixSystem 处理，
             // 这里不要每帧广播 DutyEndedEvent，避免事件风暴。
@@ -615,6 +704,9 @@ namespace EF.PoliceMod
             try { _caseManager.OnTick(); } catch (Exception ex) { ModLog.Error("[EFCore] CaseManager.OnTick exception: " + ex); }
             try { _terminalController?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] TerminalController.Tick exception: " + ex); }
             try { _radioSystem?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] RadioSystem.Tick exception: " + ex); }
+            try { _spikeSystem?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] SpikeSystem.Tick exception: " + ex); }
+            try { _k9System?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] K9System.Tick exception: " + ex); }
+            try { _convoySystem?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] ConvoySystem.Tick exception: " + ex); }
 
             // NOTE: Removed duplicate calls to _caseManager.OnTick() and _terminalController?.Tick()
             // to prevent double execution and potential side-effects.
@@ -665,8 +757,22 @@ namespace EF.PoliceMod
                 ModLog.Error("[EFCore] CompositionRoot.ShutdownAll failed: " + ex);
             }
 
+            try { _terminalController?.Shutdown(); } catch { }
+            try { _dispatchMenu?.Shutdown(); } catch { }
+            try { _arrestMenu?.Shutdown(); } catch { }
+            try { _uniformSystem?.Shutdown(); } catch { }
+            try { _officerSquadMenu?.Shutdown(); } catch { }
+            try { _patrolMenu?.Shutdown(); } catch { }
+
             LockTargetSystem?.Shutdown();
+            Systems.CaseStatusQuery.Unsubscribe();
+            Systems.DutyQuery.Unsubscribe();
+            Systems.TerminalAccessQuery.Unsubscribe();
+            Systems.CaseStatusQuery.Reset();
+            Systems.DutyQuery.Reset();
+            Systems.TerminalAccessQuery.Reset();
             EventBus.ClearAll();
+
             _deliverSystem?.Shutdown();
             try { _radioSystem?.Dispose(); } catch { }
         }
@@ -696,6 +802,12 @@ namespace EF.PoliceMod
             // 双嫌疑人专项链路（阶段A）
             if (EF.PoliceMod.Core.FeatureGates.EnableDualSuspectCase && _dualSuspect is ISystem dualSystem)
                 root.RegisterSystem(dualSystem);
+
+            if (_spikeSystem is ISystem spikeSystem)
+                root.RegisterSystem(spikeSystem);
+
+            if (_k9System is ISystem k9System)
+                root.RegisterSystem(k9System);
 
 
 

@@ -48,7 +48,19 @@ namespace EF.PoliceMod.Systems
             CreateBlip();
 
             // 兜底：下班时关掉菜单/相机
-            EventBus.Subscribe<DutyEndedEvent>(_ => ForceCloseMenu("DutyEnded"));
+            EventBus.Subscribe<DutyEndedEvent>(HandleDutyEnded);
+        }
+
+        private void HandleDutyEnded(DutyEndedEvent e)
+        {
+            ForceCloseMenu("DutyEnded");
+        }
+
+        public void Shutdown()
+        {
+            try { EventBus.Unsubscribe<DutyEndedEvent>(HandleDutyEnded); } catch { }
+            try { ForceCloseMenu("Shutdown"); } catch { }
+            try { if (_blip != null && _blip.Exists()) _blip.Delete(); } catch { }
         }
 
         public void Tick()
@@ -300,7 +312,7 @@ namespace EF.PoliceMod.Systems
                 m.Request(1000);
                 if (!m.IsLoaded) return;
 
-                Function.Call(Hash.SET_PLAYER_MODEL, Game.Player.Handle, (int)m.Hash);
+                Game.Player.ChangeModel(m);
                 m.MarkAsNoLongerNeeded();
 
                 // re-fetch
@@ -372,7 +384,7 @@ namespace EF.PoliceMod.Systems
                         m.Request(1000);
                         if (m.IsLoaded)
                         {
-                            Function.Call(Hash.SET_PLAYER_MODEL, Game.Player.Handle, (int)m.Hash);
+                            Game.Player.ChangeModel(m);
                             m.MarkAsNoLongerNeeded();
                         }
                     }

@@ -1,3 +1,4 @@
+---ModConfig.cs (KeyBindings 部分)---
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -308,7 +309,7 @@ MaxSizeKB = 512
         public static Keys PatrolMenu { get; set; } = Keys.Y;
         public static Keys ArrestMenu { get; set; } = Keys.H;
         public static Keys EscortRequest { get; set; } = Keys.G;
-        public static Keys FollowSuspect => EscortRequest; // Alias for clarity
+        public static Keys FollowSuspect => EscortRequest;
         public static Keys VehicleInteract { get; set; } = Keys.E;
         public static Keys PullOver { get; set; } = Keys.I;
         public static Keys PullOverExit { get; set; } = Keys.U;
@@ -380,9 +381,195 @@ MaxSizeKB = 512
 
         public static string GetKeyDisplayName(Keys primary, params Keys[] fallbacks)
         {
-            // P1-2 Fix: Return primary key display name, ignore fallbacks for now
-            // TODO: Implement proper display name resolution with fallbacks
             return GetKeyDisplayName(primary);
         }
     }
 }
+---ok---
+
+---EventBus.cs---
+using System;
+using System.Collections.Generic;
+
+namespace EF.PoliceMod.Core
+{
+    public static class EventBus
+    {
+
+          
+              private static readonly Dictionary<Type, List<Delegate>> _listeners =
+     new Dictionary<Type, List<Delegate>>();
+        private static readonly object _listenersLock = new object();
+
+        public static void Unsubscribe<T>(Action<T> handler)
+        {
+            var type = typeof(T);
+            lock (_listenersLock)
+            {
+                if (!_listeners.ContainsKey(type)) return;
+
+                _listeners[type].Remove(handler);
+
+                if (_listeners[type].Count == 0)
+                    _listeners.Remove(type);
+            }
+        }
+
+
+        public static void ClearAll()
+        {
+            lock (_listenersLock)
+            {
+                _listeners.Clear();
+            }
+        }
+        public static void Subscribe<T>(Action<T> handler)
+        {
+            var type = typeof(T);
+            lock (_listenersLock)
+            {
+                if (!_listeners.TryGetValue(type, out var list))
+                {
+                    list = new List<Delegate>();
+                    _listeners[type] = list;
+                }
+
+                if (!list.Contains(handler))
+                {
+                    list.Add(handler);
+                }
+            }
+        }
+
+        public static void Publish<T>(T message)
+        {
+            var type = typeof(T);
+
+#if DEBUG
+            ModLog.Info($"Event Published: {type.Name}");
+#endif
+
+            List<Delegate> handlersSnapshot;
+            lock (_listenersLock)
+            {
+                if (!_listeners.TryGetValue(type, out var list) || list == null || list.Count == 0)
+                {
+                    ModLog.Warn($"No listeners for event: {type.Name}");
+                    return;
+                }
+                handlersSnapshot = new List<Delegate>(list);
+            }
+
+            foreach (var handler in handlersSnapshot)
+            {
+                try
+                {
+                    if (handler is Action<T> actionT)
+                    {
+                        actionT(message);
+                    }
+                    else
+                    {
+                        handler.DynamicInvoke(message);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ModLog.Error($"Event handler crash: {type.Name} | {ex}");
+                }
+            }
+        }
+    }
+}
+---ok---
+
+---EFCore.cs (执行顺序部分)---
+using EF.PoliceMod.Core;
+using EF.PoliceMod.Core.Contracts;
+using EF.PoliceMod.Executors;
+using EF.PoliceMod.Gameplay;
+using EF.PoliceMod.Input;
+using EFPoliceMod;
+using GTA;
+using GTA.Native;
+using System;
+
+namespace EF.PoliceMod
+{
+
+    public class EFCore : Script
+    {
+        // ... 字段定义省略 ...
+
+        private void OnTick(object sender, EventArgs e)
+        {
+            Ped player = Game.Player.Character;
+
+            // 玩家死亡时由 DutyLifecycleController / PlayerRespawnFixSystem 处理，
+            // 这里不要每帧广播 DutyEndedEvent，避免事件风暴。
+
+            if (_lawAuthorityActive)
+            {
+                int now = Game.GameTime;
+                if (now - _lastWantedEnforceAtMs >= WantedEnforceIntervalMs)
+                {
+                    _lastWantedEnforceAtMs = now;
+                    try { EnableLawAuthority(); } catch { }
+                }
+
+                try
+                {
+                    if (Game.Player.WantedLevel > 0)
+                        Game.Player.WantedLevel = 0;
+                }
+                catch { }
+            }
+
+            // === 执行顺序 ===
+            // 1. InputManager.Update() - 处理按键输入
+            try { _input?.Update(); } catch (Exception ex) { ModLog.Error("[EFCore] Input.Update exception: " + ex); }
+
+            // 2. Duty controller
+            try { _dutyController?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] DutyController.Tick exception: " + ex); }
+
+            // 3. LockTargetSystem
+            try { LockTargetSystem?.Update(); } catch (Exception ex) { ModLog.Error("[EFCore] LockTargetSystem.Update exception: " + ex); }
+
+            // 4. 押送执行器
+            try { _suspectVehicleEscortExecutor?.TickUpdate(); } catch (Exception ex) { ModLog.Error("[EFCore] SuspectVehicleEscortExecutor.TickUpdate exception: " + ex); }
+            try { _suspectOnFootExecutor?.TickUpdate(); } catch (Exception ex) { ModLog.Error("[EFCore] SuspectOnFootExecutor.TickUpdate exception: " + ex); }
+
+            // 5. 其他系统...
+            try { _behaviorKeeper?.Update(); } catch (Exception ex) { ModLog.Error("[EFCore] BehaviorKeeper.Update exception: " + ex); }
+            try { _deliverSystem?.Update(); } catch (Exception ex) { ModLog.Error("[EFCore] DeliverSystem.Update exception: " + ex); }
+            try { _pullOverSystem?.TickUpdate(); } catch (Exception ex) { ModLog.Error("[EFCore] PullOverSystem.TickUpdate exception: " + ex); }
+
+            // 6. Menus (DispatchMenu, HeliRecon, ArrestMenu, etc.)
+            try { _dispatchMenu?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] DispatchMenu.Tick exception: " + ex); }
+            try { _heliRecon?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] HeliRecon.Tick exception: " + ex); }
+            try { _arrestMenu?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] ArrestMenu.Tick exception: " + ex); }
+
+            // 7. 其他UI系统...
+            try { _cuffSeq?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] CuffingSequence.Tick exception: " + ex); }
+            try { _uniformSystem?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] UniformSystem.Tick exception: " + ex); }
+            try { _officerSquad?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] OfficerSquad.Tick exception: " + ex); }
+            try { _officerSquadMenu?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] OfficerSquadMenu.Tick exception: " + ex); }
+            try { _squadHud?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] SquadHud.Tick exception: " + ex); }
+            try { _arrestSuppression?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] ArrestSuppression.Tick exception: " + ex); }
+            try { _patrol?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] Patrol.Tick exception: " + ex); }
+            try { _patrolMenu?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] PatrolMenu.Tick exception: " + ex); }
+
+            // 8. CaseManager 和 PoliceTerminalController
+            try { _caseManager.OnTick(); } catch (Exception ex) { ModLog.Error("[EFCore] CaseManager.OnTick exception: " + ex); }
+            
+            // === 关键: PoliceTerminalController.Tick() 在这里执行 ===
+            try { _terminalController?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] TerminalController.Tick exception: " + ex); }
+            
+            try { _radioSystem?.Tick(); } catch (Exception ex) { ModLog.Error("[EFCore] RadioSystem.Tick exception: " + ex); }
+
+            // 9. 兜底
+            try { _respawnFix?.Tick(); } catch { }
+        }
+    }
+}
+---ok---

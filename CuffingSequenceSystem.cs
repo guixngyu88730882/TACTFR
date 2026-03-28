@@ -29,6 +29,8 @@ namespace EF.PoliceMod.Systems
         // 走位/对位参数（减少瞬移穿模 + 缩短禁控）
         private Vector3 _targetBehind;
         private int _moveStartedAtMs;
+        private int _animRequestTimeMs;
+        private int _animRequestTimeMsFallback;
         private const int MOVE_TIMEOUT_MS = 1600;
         private const float BEHIND_OFFSET_Y = -0.90f;
         private const float BEHIND_OFFSET_X = 0.12f;
@@ -110,7 +112,7 @@ namespace EF.PoliceMod.Systems
         {
             try
             {
-                return World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == _suspectHandle);
+                return Entity.FromHandle(_suspectHandle) as Ped;
             }
             catch
             {
@@ -147,7 +149,7 @@ namespace EF.PoliceMod.Systems
                 try
                 {
                     // 忙碌态兜底：确保不会被“busy”挡住后续抱头/押送
-                    try { EFCore.Instance?.GetSuspectController()?.UnmarkBusy(suspect.Handle); } catch { }
+                    try { EFCore.Instance?.GetSuspectController()?.ClearBusy(suspect); } catch { }
 
                     // 上拷演出只支持玩家步行
                     try
@@ -252,6 +254,22 @@ namespace EF.PoliceMod.Systems
             {
                 try
                 {
+                    // 如果尚未开始请求动画，则请求
+                    if (_animRequestTimeMs == 0)
+                    {
+                        Function.Call(Hash.REQUEST_ANIM_DICT, "mp_arrest_paired");
+                        _animRequestTimeMs = Game.GameTime;
+                    }
+
+                    // 等待动画加载，最多等待900ms
+                    if (!Function.Call<bool>(Hash.HAS_ANIM_DICT_LOADED, "mp_arrest_paired"))
+                    {
+                        if (Game.GameTime - _animRequestTimeMs < 900)
+                        {
+                            return; // 下一帧再检查
+                        }
+                    }
+
                     // 嫌疑人手铐 + 禁 ragdoll
                     try { Function.Call(Hash.SET_ENABLE_HANDCUFFS, suspect.Handle, true); } catch { }
                     try { Function.Call(Hash.SET_PED_CAN_RAGDOLL, suspect.Handle, false); } catch { }
@@ -263,14 +281,6 @@ namespace EF.PoliceMod.Systems
                     // 优先：同步场景 + 配对动画（玩家+嫌疑人都有动作）
                     try
                     {
-                        Function.Call(Hash.REQUEST_ANIM_DICT, "mp_arrest_paired");
-                        int t = Game.GameTime + 900;
-                        while (Game.GameTime < t)
-                        {
-                            if (Function.Call<bool>(Hash.HAS_ANIM_DICT_LOADED, "mp_arrest_paired")) break;
-                            Script.Wait(0);
-                        }
-
                         if (Function.Call<bool>(Hash.HAS_ANIM_DICT_LOADED, "mp_arrest_paired"))
                         {
                             var pos = suspect.Position;
@@ -289,12 +299,18 @@ namespace EF.PoliceMod.Systems
                         // 回退：仅玩家做 a_uncuff，嫌疑人保持站立/被铐 idle
                         try
                         {
-                            Function.Call(Hash.REQUEST_ANIM_DICT, "mp_arresting");
-                            int t2 = Game.GameTime + 800;
-                            while (Game.GameTime < t2)
+                            if (_animRequestTimeMsFallback == 0)
                             {
-                                if (Function.Call<bool>(Hash.HAS_ANIM_DICT_LOADED, "mp_arresting")) break;
-                                Script.Wait(0);
+                                Function.Call(Hash.REQUEST_ANIM_DICT, "mp_arresting");
+                                _animRequestTimeMsFallback = Game.GameTime;
+                            }
+
+                            if (!Function.Call<bool>(Hash.HAS_ANIM_DICT_LOADED, "mp_arresting"))
+                            {
+                                if (Game.GameTime - _animRequestTimeMsFallback < 800)
+                                {
+                                    return;
+                                }
                             }
 
                             if (Function.Call<bool>(Hash.HAS_ANIM_DICT_LOADED, "mp_arresting"))
@@ -335,20 +351,10 @@ namespace EF.PoliceMod.Systems
             {
                 try
                 {
-                    // 给动画一点时间（更自然），但不再整段都禁控
                     if (Game.GameTime - _startedAtMs > 1550)
                     {
                         EndSequence(false);
                         ModLog.Info("[CuffSeq] Done");
-                        return;
-                    }
-
-                    // 兜底超时：防止动画/同步场景异常导致残留状态
-                    if (Game.GameTime - _startedAtMs > 3600)
-                    {
-                        try { player.Task.ClearAll(); } catch { }
-                        EndSequence(true);
-                        ModLog.Info("[CuffSeq] Done (timeout)");
                         return;
                     }
                 }

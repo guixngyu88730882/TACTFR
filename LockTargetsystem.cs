@@ -47,6 +47,19 @@ namespace EF.PoliceMod.Gameplay
             // 巡逻模式：允许锁定任意路人（但不改变“案件嫌疑人”注册逻辑）
             // 通过事件驱动开关，保持低耦合
             try { EventBus.Subscribe<EF.PoliceMod.Core.PatrolModeToggledEvent>(e => SetAllowLockAnyPed(e.Enabled)); } catch { }
+
+            try
+            {
+                EventBus.Subscribe<EF.PoliceMod.Core.TerminalCaseSelectedEvent>(_ =>
+                {
+                    if (_allowLockAnyPed)
+                    {
+                        _allowLockAnyPed = false;
+                        ModLog.Info("[LockTargetSystem] Case accepted -> allowLockAnyPed disabled");
+                    }
+                });
+            }
+            catch { }
         }
 
         private void SetAllowLockAnyPed(bool enabled)
@@ -170,6 +183,27 @@ namespace EF.PoliceMod.Gameplay
             catch (Exception ex)
             {
                 ModLog.Error("[LockTargetSystem] AutoLockCompliant failed: " + ex);
+            }
+        }
+
+        public void ForceLock(Ped suspect)
+        {
+            try
+            {
+                if (suspect == null || !suspect.Exists()) return;
+
+                _currentTarget = suspect;
+                _suspect = suspect;
+                _currentState = TargetState.Locked;
+                _everLocked = true;
+                _lockPressureTriggered = false;
+                
+                try { EventBus.Publish(new TargetLockedEvent(suspect.Handle)); } catch { }
+                ModLog.Info($"[LockTargetSystem] ForceLock handle={_currentTarget.Handle}");
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("[LockTargetSystem] ForceLock failed: " + ex);
             }
         }
 
@@ -449,7 +483,8 @@ namespace EF.PoliceMod.Gameplay
                     // 若选择“上拷牵走”，触发一次上拷演出（短暂禁控+走到背后+动画）
                     try
                     {
-                        if (_suspectController != null && _suspectController.CurrentArrestStyle == EF.PoliceMod.Core.ArrestActionStyle.CuffAndLead)
+                        if (_suspectController != null
+                            && EF.PoliceMod.Core.ArrestStyleResolver.GetForHandle(_currentTarget.Handle, _suspectController) == EF.PoliceMod.Core.ArrestActionStyle.CuffAndLead)
                         {
                             EventBus.Publish(new EF.PoliceMod.Core.CuffingSequenceRequestedEvent(_currentTarget.Handle));
                         }
@@ -507,8 +542,12 @@ namespace EF.PoliceMod.Gameplay
         {
             try
             {
-                ForceClear();
-                ModLog.Info("[LockTargetSystem] Cleared by LockTargetClearRequestedEvent");
+                if (HasTarget && IsPlayerAimingCurrentTarget())
+                {
+                    ForceClear();
+                    ModLog.Info("[LockTargetSystem] Cleared by LockTargetClearRequestedEvent");
+                    Notification.Show("~y~已解除锁定");
+                }
             }
             catch { }
         }
@@ -661,7 +700,7 @@ namespace EF.PoliceMod.Gameplay
 
         private bool IsPoliceModel(Model model)
         {
-            if (model == null || !model.IsValid) return false;
+            if (!model.IsValid) return false;
 
             string modelName = model.ToString().ToLower();
             if (modelName.Contains("cop") || modelName.Contains("swat") || modelName.Contains("fib") || modelName.Contains("army") || modelName.Contains("marine") || modelName.Contains("sheriff") || modelName.Contains("lspd") || modelName.Contains("police") || modelName.Contains("ranger") || modelName.Contains("security"))

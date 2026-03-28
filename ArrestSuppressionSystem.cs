@@ -51,6 +51,23 @@ namespace EF.PoliceMod.Systems
             if (suspect == null || !suspect.Exists()) { Cancel(); return; }
             if (officer == null || !officer.Exists() || officer.IsDead) { Cancel(); return; }
 
+            // 高危判定：如果嫌疑人有枪或反抗率高，则直接触发反抗，不进入顺从
+            try
+            {
+                bool highRisk = _suspectController != null && (_suspectController.HasFirearm || _suspectController.ResistChance >= 0.85f);
+                if (highRisk)
+                {
+                    Cancel();
+                    try { Function.Call(Hash.CLEAR_PED_TASKS_IMMEDIATELY, officer.Handle); } catch { }
+                    try { Function.Call(Hash.CLEAR_PED_TASKS, suspect.Handle); } catch { }
+                    try { _suspectController?.SetResisting(suspect); } catch { }
+                    try { EventBus.Publish(new EF.PoliceMod.Core.SuspectResistEvent(suspect, Game.Player.Character)); } catch { }
+                    Notification.Show("~r~高危嫌疑人拒捕：压制失败，准备战斗！");
+                    return;
+                }
+            }
+            catch { }
+
             float d = 9999f;
             try { d = officer.Position.DistanceTo(suspect.Position); } catch { d = 9999f; }
 
@@ -79,6 +96,12 @@ namespace EF.PoliceMod.Systems
             {
                 Notification.Show("~y~未锁定嫌疑人");
                 return;
+            }
+
+            if (_squad != null && _squad.ArrestMode)
+            {
+                // 互斥锁：关闭小队的自动抓捕模式，避免指令冲突
+                _squad.Execute(OfficerTargetSelection.All, OfficerCommand.ToggleArrestMode);
             }
 
             _squad?.SummonIfNeeded(2);

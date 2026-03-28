@@ -21,30 +21,64 @@ namespace EF.PoliceMod.Gameplay
         private int _exitTargetHandle = -1;
         private int _exitTimeoutMs = 0;
         private Vehicle _exitVehicle = null;
+        // P1-1 Fix: Removed World.GetAllPeds() per-frame scan, use handle-based lookup instead
         private Ped GetDeliverTarget()
         {
-            // Step3：案件链路优先（主嫌疑人），避免巡逻/非案件锁定目标误交付
             try
             {
                 var cm = EFCore.Instance?.GetCaseManager();
                 if (cm != null && cm.HasActiveCase)
                 {
+                    var player = Game.Player.Character;
+                    if (player == null || !player.Exists()) return null;
+
+                    // P1-1 Fix: Use handle-based lookup instead of World.GetAllPeds()
+                    var handles = cm.SuspectHandles;
+                    if (handles != null && handles.Count > 0)
+                    {
+                        Ped bestPed = null;
+                        float bestDist = float.MaxValue;
+
+                        foreach (var h in handles)
+                        {
+                            if (h <= 0) continue;
+                            
+                            // P1-1 Fix: Use Entity.FromHandle instead of World.GetAllPeds()
+                            Ped ped = null;
+                            try { ped = Entity.FromHandle(h) as Ped; } catch { }
+                            
+                            if (ped == null || !ped.Exists()) continue;
+                            if (ped.IsDead) continue;
+
+                            // P1-1 Fix: Only consider deliver-ready suspects
+                            if (!IsDeliverReady(player, ped)) continue;
+
+                            float d = ped.Position.DistanceTo(player.Position);
+                            if (d < bestDist)
+                            {
+                                bestDist = d;
+                                bestPed = ped;
+                            }
+                        }
+
+                        if (bestPed != null) return bestPed;
+                    }
+
+                    // Single suspect fallback
                     int activeHandle = cm.CurrentSuspectHandle;
                     if (activeHandle > 0)
                     {
-                        var ped = World.GetAllPeds().FirstOrDefault(x => x != null && x.Exists() && x.Handle == activeHandle);
+                        Ped ped = null;
+                        try { ped = Entity.FromHandle(activeHandle) as Ped; } catch { }
                         if (ped != null && ped.Exists()) return ped;
                     }
                 }
             }
-            catch { }
-
-            try
+            catch (Exception ex)
             {
-                Ped locked = _lockTargetSystem != null ? _lockTargetSystem.CurrentTarget : null;
-                if (locked != null && locked.Exists()) return locked;
+                ModLog.Error("[Deliver] GetDeliverTarget error: " + ex);
             }
-            catch { }
+
             return null;
         }
 
@@ -187,7 +221,17 @@ namespace EF.PoliceMod.Gameplay
                 {
                     Ped target = Entity.FromHandle(_exitTargetHandle) as Ped;
 
-                    if (!target.Exists() || !target.IsInVehicle())
+                    if (target == null || !target.Exists())
+                    {
+                        ModLog.Warn("[Deliver] Exit wait aborted: target lost");
+                        _waitingForSuspectExit = false;
+                        _exitTargetHandle = 0;
+                        _exitVehicle = null;
+                        _exitTimeoutMs = 0;
+                        return;
+                    }
+
+                    if (!target.IsInVehicle())
                     {
                         _waitingForSuspectExit = false;
                         CompleteDelivery(target);
@@ -207,6 +251,9 @@ namespace EF.PoliceMod.Gameplay
                 {
                     ModLog.Error("[Deliver] 退出等待错误：" + ex);
                     _waitingForSuspectExit = false;
+                    _exitTargetHandle = 0;
+                    _exitVehicle = null;
+                    _exitTimeoutMs = 0;
                 }
                 return;
             }
@@ -266,7 +313,7 @@ namespace EF.PoliceMod.Gameplay
                     target.AlwaysKeepTask = true;
 
                     Vehicle veh = target.CurrentVehicle;
-                    Script.Wait(0);
+                    // P1-1 Fix: Removed Script.Wait(0) which blocks the main thread
 
                     if (veh == null || !veh.Exists())
                     {
@@ -278,11 +325,11 @@ namespace EF.PoliceMod.Gameplay
                     {
                         try
                         {
-                            target.Task.LeaveVehicle(veh, LeaveVehicleFlags.None);
+                            target.Task.LeaveVehicle(veh, (LeaveVehicleFlags)256);
                             _waitingForSuspectExit = true;
                             _exitTargetHandle = target.Handle;
                             _exitVehicle = veh;
-                            _exitTimeoutMs = Game.GameTime + 5000;
+                            _exitTimeoutMs = Game.GameTime + 8000; // Give it 8 seconds to play animation
                             return;
                         }
                         catch (Exception ex)
@@ -316,6 +363,12 @@ namespace EF.PoliceMod.Gameplay
 
         private void CompleteDelivery(Ped target)
         {
+            if (target == null || !target.Exists())
+            {
+                ModLog.Warn("[Deliver] CompleteDelivery aborted: target invalid");
+                return;
+            }
+
             Game.Player.Money += 10000;
             GTA.UI.Notification.Show("~g~嫌疑人已成功交付\n~w~+$10000");
 
@@ -345,6 +398,11 @@ namespace EF.PoliceMod.Gameplay
             {
                 ModLog.Error("[Deliver] LockTargetSystem.ForceClear failed: " + exClear);
             }
+
+            _exitTargetHandle = 0;
+            _exitVehicle = null;
+            _exitTimeoutMs = 0;
+            _waitingForSuspectExit = false;
         }
     }
 }

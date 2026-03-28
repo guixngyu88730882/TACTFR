@@ -173,11 +173,34 @@ namespace EFPoliceMod
                 var player = Game.Player.Character;
                 if (player == null) return;
 
+                player.Weapons.RemoveAll();
+
+                if (_originalModel.IsValid)
+                {
+                    _originalModel.Request(1000);
+                    if (_originalModel.IsLoaded)
+                    {
+                        Game.Player.ChangeModel(_originalModel);
+                        _originalModel.MarkAsNoLongerNeeded();
+                    }
+                    ModLog.Info($"[DutyLifecycleController] Restored original model: {_originalModel.Hash}");
+                }
+
+                var newPlayer = Game.Player.Character;
+                if (newPlayer == null || !newPlayer.Exists()) return;
+
+                if (_originalModel.IsValid && newPlayer.Model.Hash != _originalModel.Hash)
+                {
+                    ModLog.Warn("[DutyLifecycleController] Model switch not reflected immediately after restore");
+                    try { newPlayer = Game.Player.Character; } catch { }
+                    if (newPlayer == null || !newPlayer.Exists()) return;
+                }
+
                 foreach (var wi in _savedWeapons)
                 {
                     try
                     {
-                        player.Weapons.Give(wi.Hash, wi.Ammo, false, true);
+                        newPlayer.Weapons.Give(wi.Hash, wi.Ammo, false, true);
                     }
                     catch { }
                 }

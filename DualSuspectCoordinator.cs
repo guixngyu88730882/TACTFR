@@ -73,7 +73,7 @@ namespace EF.PoliceMod.Systems
                 if (player == null || !player.Exists()) return;
 
                 Ped s2 = null;
-                try { s2 = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == _secondaryHandle); } catch { s2 = null; }
+                try { s2 = Entity.FromHandle(_secondaryHandle) as Ped; } catch { s2 = null; }
                 if (s2 == null || !s2.Exists()) return;
 
                 float dist = 9999f;

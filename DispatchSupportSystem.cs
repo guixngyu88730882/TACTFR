@@ -16,7 +16,6 @@ namespace EF.PoliceMod.Systems
         private const int CooldownMs = 1200;
 
         private const int FollowUpdateDebounceMs = 150;
-        private int _lastFollowUpdateAtMs = 0;
         private const int FollowModeDebounceMs = 600;
         private int _lastFollowModeAtMs = 0;
         private const float FollowMaxSpeed = 32.0f;
@@ -71,7 +70,8 @@ namespace EF.PoliceMod.Systems
         public DispatchSupportSystem()
         {
             EventBus.Subscribe<DutyEndedEvent>(_ => ClearAllBackup("DutyEnded"));
-            EventBus.Subscribe<EF.PoliceMod.Input.SuspectResistEvent>(OnSuspectResist);
+            // P0-2 Fix: Use unified SuspectResistEvent from Core namespace
+            EventBus.Subscribe<EF.PoliceMod.Core.SuspectResistEvent>(OnSuspectResist);
         }
 
         public void Initialize()
@@ -110,11 +110,18 @@ namespace EF.PoliceMod.Systems
         }
 
 
-        private void OnSuspectResist(EF.PoliceMod.Input.SuspectResistEvent e)
+        // P0-2 Fix: Use unified SuspectResistEvent from Core namespace
+        private void OnSuspectResist(EF.PoliceMod.Core.SuspectResistEvent e)
         {
             try
             {
-                if (e.Suspect == null || !e.Suspect.Exists()) return;
+                // P0-2 Fix: Support both Ped and Handle properties
+                Ped suspect = e.Suspect;
+                if (suspect == null && e.SuspectHandle > 0)
+                {
+                    try { suspect = Entity.FromHandle(e.SuspectHandle) as Ped; } catch { }
+                }
+                if (suspect == null || !suspect.Exists()) return;
 
                 foreach (var u in _backupUnits)
                 {
@@ -253,7 +260,6 @@ namespace EF.PoliceMod.Systems
 
             _lastFollowModeAtMs = now;
             _convoyMode = ConvoyMode.FollowPlayer;
-            _lastFollowUpdateAtMs = 0;
             foreach (var u in _backupUnits)
             {
                 u.IsFollowing = false;
@@ -262,19 +268,13 @@ namespace EF.PoliceMod.Systems
             ModLog.Info($"[Dispatch] SetConvoyFollowPlayer called, units={_backupUnits.Count}");
             Notification.Show("~b~支援车队：跟随玩家");
 
-            // 立刻重发一次，避免“选了跟随但车不动”
-            try { _lastFollowUpdateAtMs = 0; } catch { }
+            // 立刻重发一次，避免"选了跟随但车不动"
             try { TickUpdate(); } catch { }
         }
 
 
         public void SetConvoyFreeRoam()
         {
-            if (!EF.PoliceMod.Core.FeatureGates.EnableF7Convoy)
-            {
-                return;
-            }
-
             _convoyMode = ConvoyMode.FreeRoam;
             _lastFreeRoamIssuedAtMs = 0;
             foreach (var u in _backupUnits)

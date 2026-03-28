@@ -40,12 +40,11 @@ namespace EF.PoliceMod.Suspects
 
         public SuspectStateHub GetWriterHubFor(int suspectHandle, SuspectState state)
         {
-            try
+            if (_writerGate != null && _writerGate.AllowsPerHandleWrite(state))
             {
-                if (_writerGate != null && _writerGate.AllowsPerHandleWrite(state))
-                    return GetHubFor(suspectHandle);
+                var hub = GetHubFor(suspectHandle);
+                if (hub != _legacyHub) return hub;
             }
-            catch { }
             return _legacyHub;
         }
     }

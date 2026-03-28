@@ -141,7 +141,7 @@ namespace EF.PoliceMod.Systems
 
             try
             {
-                var ped = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == _targetHandle);
+                var ped = Entity.FromHandle(_targetHandle) as Ped;
                 if (ped == null || !ped.Exists()) return;
                 ISuspectContext ctx = EFCore.Instance?.GetCaseManager() as ISuspectContext;
                 if (ctx == null)

@@ -12,12 +12,30 @@ namespace EF.PoliceMod.Systems
         public static int CaseStartedAtMs { get; private set; }
         public static bool HeliReconUsed { get; private set; }
         public static int CurrentSuspectHandle { get; private set; }
+        private static bool _subscribed;
+        private static readonly System.Action<CaseStatusChangedEvent> _onChanged = OnChanged;
+        private static readonly System.Action<DutyEndedEvent> _onDutyEnded = OnDutyEnded;
 
         static CaseStatusQuery()
         {
             Reset();
-            EventBus.Subscribe<CaseStatusChangedEvent>(OnChanged);
-            EventBus.Subscribe<DutyEndedEvent>(_ => Reset());
+            Subscribe();
+        }
+
+        public static void Subscribe()
+        {
+            if (_subscribed) return;
+            EventBus.Subscribe<CaseStatusChangedEvent>(_onChanged);
+            EventBus.Subscribe<DutyEndedEvent>(_onDutyEnded);
+            _subscribed = true;
+        }
+
+        public static void Unsubscribe()
+        {
+            if (!_subscribed) return;
+            EventBus.Unsubscribe<CaseStatusChangedEvent>(_onChanged);
+            EventBus.Unsubscribe<DutyEndedEvent>(_onDutyEnded);
+            _subscribed = false;
         }
 
         private static void OnChanged(CaseStatusChangedEvent e)
@@ -30,13 +48,18 @@ namespace EF.PoliceMod.Systems
             ModLog.Info($"[CaseStatusQuery] Received: active={e.HasActiveCase}, lost={e.IsSuspectLost}, handle={e.CurrentSuspectHandle}");
         }
 
-        private static void Reset()
+        public static void Reset()
         {
             HasActiveCase = false;
             IsSuspectLost = false;
             CaseStartedAtMs = 0;
             HeliReconUsed = false;
             CurrentSuspectHandle = -1;
+        }
+
+        private static void OnDutyEnded(DutyEndedEvent e)
+        {
+            Reset();
         }
     }
 }

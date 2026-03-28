@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using GTA;
 using GTA.Native;
 using GTA.UI;
@@ -27,6 +28,10 @@ namespace EF.PoliceMod.Systems
         private bool _num9Held = false;
         private int _uiInputDebounceMs = 150;
         private int _lastUiInputTime = 0;
+
+        // Fix: Add open/close guard to prevent "flash and disappear" bug
+        private int _openedAtMs = 0;
+        private const int OpenCloseGuardMs = 500;
 
         private const int KEY_PRESSED_MASK = 0x8000;
         [DllImport("user32.dll")]
@@ -79,19 +84,32 @@ namespace EF.PoliceMod.Systems
             _page = TerminalPage.RootModeSelect;
             _teamMode = CaseTeamMode.Single;
             _index = 0;
+
+            // Fix: Reset all held states to prevent key residue issues
+            _num8Held = false;
+            _num2Held = false;
+            _num5Held = false;
+            _num0Held = false;
+            _num9Held = false;
+            _lastUiInputTime = 0;
+
+            // Fix: Record open time for guard window
+            _openedAtMs = Game.GameTime;
+
             BuildRootOptions();
 
             RequestTextureDict();
-            EF.PoliceMod.Core.UIState.MarkPoliceTerminalOpen(Game.GameTime);
+            // Controller负责登记UIState，UI只负责自身状态
         }
 
         public void Close()
         {
+            ModLog.Warn("[TerminalUI] Close called");
             _open = false;
             _index = 0;
             _page = TerminalPage.RootModeSelect;
             _currentOptions.Clear();
-            EF.PoliceMod.Core.UIState.MarkPoliceTerminalClosed();
+            // Fix: UI不再直接改UIState，由Controller负责生命周期
         }
 
         public void Update()
@@ -145,7 +163,7 @@ namespace EF.PoliceMod.Systems
                 {
                     OptionId = 910,
                     Stars = 2,
-                    DisplayName = "单人案件",
+                    DisplayName = "单人案件（1名嫌疑人）",
                     SuspectName = "1 名嫌疑人",
                     Crime = "标准处置",
                     Location = "全域",
@@ -153,11 +171,61 @@ namespace EF.PoliceMod.Systems
                     Reason = "任务",
                 },
             };
+
+            if (FeatureGates.EnableDualSuspectCase)
+            {
+                _currentOptions.Add(new TerminalOption
+                {
+                    OptionId = 911,
+                    Stars = 4,
+                    DisplayName = "双人案件（2名嫌疑人）",
+                    SuspectName = "2 名嫌疑人",
+                    Crime = "高危处置",
+                    Location = "全域",
+                    LastSeen = "系统",
+                    Reason = "任务",
+                });
+            }
+
             _index = 0;
             _page = TerminalPage.CaseTeamSelect;
         }
 
+        // P1-3 Fix: BuildCaseList now uses data-driven approach via WantedRegistry
+        // TODO: WantedRegistry.RefreshFromWorld() needs to be implemented to fetch real wanted data
         private void BuildCaseList(CaseTeamMode teamMode)
+        {
+            // P1-3 Fix: Try to get data from WantedRegistry first
+            var wantedCases = _wantedRegistry?.GetAvailableCases(teamMode == CaseTeamMode.Dual);
+            if (wantedCases != null && wantedCases.Count > 0)
+            {
+                _currentOptions = wantedCases.Select(c => new TerminalOption
+                {
+                    OptionId = c.OptionId,
+                    DisplayName = c.DisplayName,
+                    Stars = c.Stars,
+                    LastSeen = c.LastSeen,
+                    Reason = c.Reason,
+                    SuspectName = c.SuspectName,
+                    Crime = c.Crime,
+                    Location = c.Location
+                }).ToList();
+                
+                _teamMode = teamMode;
+                _page = TerminalPage.CaseList;
+                _index = 0;
+                ModLog.Info("[TerminalUI] Loaded case list from WantedRegistry");
+                return;
+            }
+
+            // P1-3 Fix: Fallback to random generation if WantedRegistry returns empty
+            // TODO: Remove this fallback once WantedRegistry.RefreshFromWorld() is implemented
+            ModLog.Warn("[TerminalUI] WantedRegistry returned empty case list, falling back to random generation");
+            BuildRandomCaseList(teamMode);
+        }
+
+        // P1-3 Fix: Extracted random generation to separate method (to be removed once data-driven)
+        private void BuildRandomCaseList(CaseTeamMode teamMode)
         {
             var names = new[] { "杰克", "亚瑟", "汤米", "尼克", "迈卡", "唐纳德" };
             var crimesOnFoot = new[] { "盗窃", "斗殴", "扰乱治安", "非法入侵" };
@@ -275,6 +343,19 @@ namespace EF.PoliceMod.Systems
         {
             int now = Game.GameTime;
 
+            // Fix: Guard window - swallow all inputs for first 250ms after opening
+            // This prevents "open key residue" from immediately closing the menu
+            if (now - _openedAtMs <= OpenCloseGuardMs)
+            {
+                // Update held states without acting on them
+                _num8Held = IsRawKeyDown(KeyBindings.MenuUp);
+                _num2Held = IsRawKeyDown(KeyBindings.MenuDown);
+                _num5Held = IsRawKeyDown(KeyBindings.MenuConfirm);
+                _num0Held = IsRawKeyDown(KeyBindings.MenuCancel);
+                _num9Held = IsRawKeyDown(KeyBindings.MenuRefresh);
+                return;
+            }
+
             if (IsRawKeyDown(KeyBindings.MenuUp))
             {
                 if (!_num8Held && now - _lastUiInputTime >= _uiInputDebounceMs)
@@ -308,7 +389,7 @@ namespace EF.PoliceMod.Systems
             }
             else _num5Held = false;
 
-            if (IsRawKeyDown(KeyBindings.MenuCancel))
+            if (IsRawKeyDown(KeyBindings.MenuCancel) || IsRawKeyDown(System.Windows.Forms.Keys.NumPad0))
             {
                 if (!_num0Held && now - _lastUiInputTime >= _uiInputDebounceMs)
                 {
@@ -351,8 +432,14 @@ namespace EF.PoliceMod.Systems
 
                 if (rec.OptionId == 900)
                 {
-                    // 当前版本仅开放单人案件入口（保留 CaseTeam 页面结构以便后续恢复）。
-                    BuildCaseList(CaseTeamMode.Single);
+                    if (FeatureGates.EnableDualSuspectCase)
+                    {
+                        BuildCaseTeamOptions();
+                    }
+                    else
+                    {
+                        BuildCaseList(CaseTeamMode.Single);
+                    }
                 }
                 return;
             }
@@ -366,8 +453,15 @@ namespace EF.PoliceMod.Systems
                 }
                 else if (rec.OptionId == 911)
                 {
-                    Notification.Show("~y~双人案件功能当前版本已关闭");
-                    BuildCaseList(CaseTeamMode.Single);
+                    if (FeatureGates.EnableDualSuspectCase)
+                    {
+                        BuildCaseList(CaseTeamMode.Dual);
+                    }
+                    else
+                    {
+                        Notification.Show("~y~双人案件功能当前版本已关闭");
+                        BuildCaseList(CaseTeamMode.Single);
+                    }
                 }
                 return;
             }
@@ -382,6 +476,7 @@ namespace EF.PoliceMod.Systems
 
         private void BackOrClose()
         {
+            ModLog.Warn($"[TerminalUI] BackOrClose page={_page}");
             if (_page == TerminalPage.CaseList)
             {
                 BuildRootOptions();

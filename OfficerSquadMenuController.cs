@@ -2,6 +2,7 @@ using EF.PoliceMod.Core;
 using EF.PoliceMod.Input;
 using GTA;
 using GTA.Native;
+using GTA.UI;
 using System;
 using System.Runtime.InteropServices;
 using Keys = System.Windows.Forms.Keys;
@@ -15,11 +16,14 @@ namespace EF.PoliceMod.Systems
     /// - 5 确认
     /// - Back 取消
     /// </summary>
-    public class OfficerSquadMenuController
+    public class OfficerSquadMenuController : EF.PoliceMod.Core.IUiSession
     {
         private readonly OfficerSquadSystem _squad;
 
-        private bool _open = false;
+        // P0-1 Fix: Use UIState as single source of truth
+        public string SessionId => EF.PoliceMod.Core.UIState.OfficerSquadMenuSession;
+        public bool IsOpen => EF.PoliceMod.Core.UIState.IsOfficerSquadMenuOpen;
+        
         private int _selectedCmd = 0;
         private int _targetIndex = 2; // 0=1,1=2,2=all
 
@@ -60,8 +64,35 @@ namespace EF.PoliceMod.Systems
         public OfficerSquadMenuController(OfficerSquadSystem squad)
         {
             _squad = squad;
-            EventBus.Subscribe<OpenOfficerSquadMenuEvent>(_ => Toggle());
-            EventBus.Subscribe<DutyEndedEvent>(_ => Close());
+            EventBus.Subscribe<OpenOfficerSquadMenuEvent>(HandleOpenMenu);
+            EventBus.Subscribe<DutyEndedEvent>(HandleDutyEnded);
+        }
+
+        private void HandleOpenMenu(OpenOfficerSquadMenuEvent e)
+        {
+            bool onDuty = false;
+            try { onDuty = EF.PoliceMod.Systems.DutyQuery.IsOnDuty; } catch { onDuty = false; }
+
+            if (onDuty)
+            {
+                Toggle();
+            }
+            else
+            {
+                Notification.Show("~y~请先开始执勤");
+            }
+        }
+
+        private void HandleDutyEnded(DutyEndedEvent e)
+        {
+            Close();
+        }
+
+        public void Shutdown()
+        {
+            try { EventBus.Unsubscribe<OpenOfficerSquadMenuEvent>(HandleOpenMenu); } catch { }
+            try { EventBus.Unsubscribe<DutyEndedEvent>(HandleDutyEnded); } catch { }
+            try { Close(); } catch { }
         }
 
         private void Toggle()
@@ -70,12 +101,22 @@ namespace EF.PoliceMod.Systems
             if (now - _lastToggleAtMs < ToggleDebounceMs) return;
             _lastToggleAtMs = now;
 
-            if (_open) Close(); else Open();
+            if (IsOpen) Close(); else Open();
         }
 
         private void Open()
         {
-            _open = true;
+            // P0-1 Fix: Check if any other UI is open
+            string busyUi = UIState.GetBusyUiName(UIState.OfficerSquadMenuSession);
+            if (!string.IsNullOrEmpty(busyUi))
+            {
+                Notification.Show($"~y~请先关闭 {busyUi}");
+                return;
+            }
+
+            // P0-1 Fix: Register session with UIState
+            UIState.RegisterSession(UIState.OfficerSquadMenuSession, this);
+            
             _selectedCmd = 0;
             _openedAtMs = Game.GameTime;
             UIState.MarkOfficerSquadMenuOpen(Game.GameTime);
@@ -83,15 +124,21 @@ namespace EF.PoliceMod.Systems
 
         private void Close()
         {
-            _open = false;
             UIState.MarkOfficerSquadMenuClosed();
 
             _upHeld = _downHeld = _leftHeld = _rightHeld = _confirmHeld = _cancelHeld = false;
         }
 
+        // P0-1 Fix: Implement IUiSession.ForceClose
+        public void ForceClose(string reason)
+        {
+            ModLog.Info($"[OfficerSquadMenu] ForceClose called: {reason}");
+            Close();
+        }
+
         public void Tick()
         {
-            if (!_open) return;
+            if (!IsOpen) return;
 
             UIState.BeatOfficerSquadMenu(Game.GameTime);
 

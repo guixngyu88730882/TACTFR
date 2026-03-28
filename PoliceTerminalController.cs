@@ -9,13 +9,18 @@ using System;
 using System.Collections.Generic;
 namespace EF.PoliceMod.Systems
 {
-    public class PoliceTerminalController
+    public class PoliceTerminalController : EF.PoliceMod.Core.IUiSession
     {
         readonly WantedRegistry _wantedRegistry;
         readonly PoliceTerminalUI _ui;
         readonly List<Vector3> _terminalPositions = new List<Vector3>();
-        const float INTERACT_RANGE = 2.0f;
-        bool _uiOpen = false;
+
+        // Fix: Use configurable interact range instead of hardcoded constant
+        private readonly float _interactRange;
+
+        // P0-1 Fix: Use UIState as single source of truth, remove local _uiOpen
+        public string SessionId => EF.PoliceMod.Core.UIState.PoliceTerminalSession;
+        public bool IsOpen => EF.PoliceMod.Core.UIState.IsPoliceTerminalOpen;
         private Blip _terminalBlip;
         // 自绘左上角提示状态（用于持续显示，不触发系统提示音）
         private bool _wasPlayerNearTerminal = false;
@@ -26,42 +31,62 @@ namespace EF.PoliceMod.Systems
         {
             ModLog.Info("[PoliceTerminal] Received OpenPoliceTerminalEvent");
 
-            if (_uiOpen)
+            // P0-1 Fix: Use UIState as single source of truth
+            if (EF.PoliceMod.Core.UIState.IsPoliceTerminalOpen)
             {
                 ModLog.Info("[PoliceTerminal] UI already open; ignoring OpenPoliceTerminalEvent");
                 return;
             }
 
+            // P0-1 Fix: Check if any other UI is open
+            string busyUi = EF.PoliceMod.Core.UIState.GetBusyUiName(EF.PoliceMod.Core.UIState.PoliceTerminalSession);
+            if (!string.IsNullOrEmpty(busyUi))
+            {
+                ModLog.Info($"[PoliceTerminal] Another UI is open ({busyUi}); ignoring OpenPoliceTerminalEvent");
+                Notification.Show($"~y~请先关闭 {busyUi}");
+                return;
+            }
 
-            // 车载终端：仅 T 键入口允许在车内打开；O 键入口仍要求在警局终端点范围内
-            try
+            // P0-1 Fix: Unified access control - both vehicle and station terminal use same CanOpenTerminal check
+            bool onDuty = false;
+            try { onDuty = EF.PoliceMod.Systems.DutyQuery.IsOnDuty; } catch { onDuty = false; }
+            
+            if (!onDuty)
+            {
+                ModLog.Info("[PoliceTerminal] Cannot open: not on duty");
+                Notification.Show("~y~未执勤：请先开始执勤");
+                return;
+            }
+
+            bool fromVehicle = false;
+            try { fromVehicle = (e.Source == EF.PoliceMod.Input.OpenPoliceTerminalSource.VehicleTerminal); } catch { fromVehicle = false; }
+            
+            if (fromVehicle)
             {
                 var player = Game.Player.Character;
-                bool onDuty = EF.PoliceMod.Systems.DutyQuery.IsOnDuty;
                 bool inVehicle = player != null && player.Exists() && player.IsInVehicle();
-
-                bool fromVehicle = false;
-                try { fromVehicle = (e.Source == EF.PoliceMod.Input.OpenPoliceTerminalSource.VehicleTerminal); } catch { fromVehicle = false; }
-
-                if (fromVehicle && onDuty && inVehicle)
+                if (!inVehicle)
                 {
-                    OpenUI();
+                    ModLog.Info("[PoliceTerminal] Vehicle terminal: player not in vehicle");
+                    Notification.Show("~y~车载终端：需坐入车辆内");
                     return;
                 }
             }
-            catch { }
-
-            if (!IsPlayerNearAnyTerminal())
+            else
             {
-                ModLog.Info("[PoliceTerminal] Player not near any terminal");
-                Notification.Show("~y~你不在警用终端附近");
-                return;
+                // Station terminal - check proximity
+                if (!IsPlayerNearAnyTerminal())
+                {
+                    ModLog.Info("[PoliceTerminal] Player not near any terminal");
+                    Notification.Show("~y~不在终端范围：请靠近警用终端");
+                    return;
+                }
             }
 
             if (!CanOpenTerminal())
             {
-                ModLog.Info("[PoliceTerminal] CanOpenTerminal == false (case manager denied)");
-                Notification.Show("~y~暂时无法打开终端");
+                ModLog.Info("[PoliceTerminal] CanOpenTerminal == false (case in progress)");
+                Notification.Show("~y~案件中：请先完成当前案件");
                 return;
             }
 
@@ -74,6 +99,8 @@ namespace EF.PoliceMod.Systems
             {
                 // 退订事件，防止在模组卸载/重载时出现悬挂回调
                 EventBus.Unsubscribe<OpenPoliceTerminalEvent>(HandleOpenTerminalEvent);
+                EventBus.Unsubscribe<DutyEndedEvent>(HandleDutyEndedEvent);
+                EventBus.Unsubscribe<EF.PoliceMod.Core.SuspectDeliveredEvent>(HandleSuspectDeliveredEvent);
             }
             catch (Exception ex)
             {
@@ -104,18 +131,41 @@ namespace EF.PoliceMod.Systems
             // 如果 UI 打开，恢复控制（保险）
             try
             {
-                if (_uiOpen)
+                if (EF.PoliceMod.Core.UIState.IsPoliceTerminalOpen)
                 {
-                    _uiOpen = false;
-
-                    try { EF.PoliceMod.Core.UIState.MarkPoliceTerminalClosed(); } catch { }
-                    RestorePlayerControl();
-                    _ui?.Close();
+                    ForceClose("Shutdown");
                 }
             }
             catch (Exception ex)
             {
                 ModLog.Error("[PoliceTerminal] Shutdown restore UI/control error: " + ex);
+            }
+
+            // Fix: Unregister session to clean up properly
+            try
+            {
+                EF.PoliceMod.Core.UIState.UnregisterSession(EF.PoliceMod.Core.UIState.PoliceTerminalSession, this);
+                ModLog.Info("[PoliceTerminal] Session unregistered during shutdown");
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("[PoliceTerminal] Failed to unregister session: " + ex);
+            }
+        }
+
+        // P0-1 Fix: Implement IUiSession.ForceClose for unified UI state management
+        public void ForceClose(string reason)
+        {
+            ModLog.Warn($"[PoliceTerminal] ForceClose called, reason={reason}");
+            try
+            {
+                EF.PoliceMod.Core.UIState.MarkPoliceTerminalClosed();
+                RestorePlayerControl();
+                _ui?.Close();
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("[PoliceTerminal] ForceClose error: " + ex);
             }
         }
 
@@ -125,10 +175,23 @@ namespace EF.PoliceMod.Systems
             _wantedRegistry = wantedRegistry;
             _ui = new PoliceTerminalUI(_wantedRegistry, OnSelected, OnClosed);
 
-            // 添加默认/示例终端点（你可以替换或追加更多点）
-            // 我把两个示例坐标都放进列表，若你只想要一个位置，删除其中一行即可
-            _terminalPositions.Add(new Vector3(441.4f, -981.8f, 30.7f));
-            _terminalPositions.Add(new Vector3(443.5f, -981.0f, 30.7f));
+            // Fix: Read interact range from config (minimum 1.5f to prevent invalid values)
+            _interactRange = Math.Max(1.5f, EF.PoliceMod.Core.ModConfig.TerminalInteractRange);
+            ModLog.Info($"[PoliceTerminalController] Interact range set to: {_interactRange}");
+
+            // P0-1 Fix: Use configurable terminal positions from ModConfig
+            var configPositions = EF.PoliceMod.Core.ModConfig.TerminalPositions;
+            if (configPositions != null && configPositions.Count > 0)
+            {
+                _terminalPositions.AddRange(configPositions);
+                ModLog.Info($"[PoliceTerminalController] Loaded {configPositions.Count} terminal positions from config");
+            }
+            else
+            {
+                // Fallback to defaults
+                _terminalPositions.Add(new Vector3(441.4f, -981.8f, 30.7f));
+                _terminalPositions.Add(new Vector3(443.5f, -981.0f, 30.7f));
+            }
 
             // 创建地图图标（警用终端）——使用第一个坐标作为图标位置
             try
@@ -152,10 +215,20 @@ namespace EF.PoliceMod.Systems
 
             // 订阅打开终端事件（InputManager 会发布 OpenPoliceTerminalEvent）
             EventBus.Subscribe<OpenPoliceTerminalEvent>(HandleOpenTerminalEvent);
-            EventBus.Subscribe<DutyEndedEvent>(_ => { try { if (_uiOpen) CloseUI(); } catch { } });
-            EventBus.Subscribe<EF.PoliceMod.Core.SuspectDeliveredEvent>(_ => { try { if (_uiOpen) CloseUI(); } catch { } });
+            EventBus.Subscribe<DutyEndedEvent>(HandleDutyEndedEvent);
+            EventBus.Subscribe<EF.PoliceMod.Core.SuspectDeliveredEvent>(HandleSuspectDeliveredEvent);
 
             ModLog.Info("[PoliceTerminalController] Initialized with " + _terminalPositions.Count + " terminal positions");
+        }
+
+        private void HandleDutyEndedEvent(DutyEndedEvent e)
+        {
+            try { if (IsOpen) CloseUI(); } catch { }
+        }
+
+        private void HandleSuspectDeliveredEvent(EF.PoliceMod.Core.SuspectDeliveredEvent e)
+        {
+            try { if (IsOpen) CloseUI(); } catch { }
         }
 
 
@@ -179,7 +252,8 @@ namespace EF.PoliceMod.Systems
                 var playerPos = player.Position;
                 foreach (var p in _terminalPositions)
                 {
-                    if (playerPos.DistanceTo(p) <= INTERACT_RANGE) return true;
+                    // Fix: Use configurable interact range instead of hardcoded constant
+                    if (playerPos.DistanceTo(p) <= _interactRange) return true;
                 }
             }
             catch (Exception ex)
@@ -194,24 +268,45 @@ namespace EF.PoliceMod.Systems
 
         void OpenUI()
         {
-            _uiOpen = true;
-            EF.PoliceMod.Core.UIState.MarkPoliceTerminalOpen(Game.GameTime);
-            ModLog.Info("[PoliceTerminal] Opened - clearing help text/sound");
-            // 清除可能残留的 help（停止提示音）
+            // P0-1 Fix: Transactional open - check preconditions first
+            if (EF.PoliceMod.Core.UIState.IsPoliceTerminalOpen)
+            {
+                ModLog.Warn("[PoliceTerminal] OpenUI called but UI already open");
+                return;
+            }
+
+            // P0-1 Fix: Register session with UIState before opening
+            EF.PoliceMod.Core.UIState.RegisterSession(EF.PoliceMod.Core.UIState.PoliceTerminalSession, this);
+
             try
             {
-                Function.Call(Hash.CLEAR_HELP, true);
+                int now = Game.GameTime;
+                EF.PoliceMod.Core.UIState.MarkPoliceTerminalOpen(now);
+                EF.PoliceMod.Core.UIState.BeatPoliceTerminal(now);
+
+                ModLog.Info("[PoliceTerminal] Opened - clearing help text/sound");
+                // 清除可能残留的 help（停止提示音）
+                try
+                {
+                    Function.Call(Hash.CLEAR_HELP, true);
+                }
+                catch { }
+                LockPlayerControl();
+                _wantedRegistry.RefreshFromWorld();
+                _ui.Open();
             }
-            catch { }
-            LockPlayerControl();
-            _wantedRegistry.RefreshFromWorld();
-            _ui.Open();
+            catch (Exception ex)
+            {
+                // P0-1 Fix: Rollback on failure
+                ModLog.Error("[PoliceTerminal] OpenUI failed, rolling back: " + ex);
+                ForceClose("OpenUIFailed");
+            }
         }
 
 
         void CloseUI()
         {
-            _uiOpen = false;
+            ModLog.Warn("[PoliceTerminal] CloseUI called");
             _ui.Close();
             // 恢复全局 UI 状态
             EF.PoliceMod.Core.UIState.MarkPoliceTerminalClosed();
@@ -238,6 +333,7 @@ namespace EF.PoliceMod.Systems
 
         void OnClosed()
         {
+            ModLog.Warn("[PoliceTerminal] OnClosed invoked by UI");
             CloseUI();
         }
 
@@ -314,31 +410,46 @@ namespace EF.PoliceMod.Systems
         // 在主 Tick 中被调用（见 EFCore 的 wiring）
         public void Tick()
         {
-
-            // 自愈：只通过 UIState 公开方法复位（避免直接改 public 字段导致状态不一致）
-            try
-            {
-                if (!_uiOpen && EF.PoliceMod.Core.UIState.IsPoliceTerminalOpen)
-                {
-                    ModLog.Warn("[PoliceTerminal] UIState.IsPoliceTerminalOpen stuck true while _uiOpen=false -> auto reset");
-                    EF.PoliceMod.Core.UIState.MarkPoliceTerminalClosed();
-                    RestorePlayerControl();
-                }
-            }
-            catch { }
+            // P0-1 Fix: Use UIState as single source of truth
+            bool isUiOpen = EF.PoliceMod.Core.UIState.IsPoliceTerminalOpen;
 
             // 如果 UI 打开，UI 自己会处理按键与绘制（PoliceTerminalUI.Update）
-            if (_uiOpen)
+            if (isUiOpen)
             {
                 EF.PoliceMod.Core.UIState.BeatPoliceTerminal(Game.GameTime);
-                _ui.Update();
+
+                try
+                {
+                    _ui.Update();
+                }
+                catch (Exception ex)
+                {
+                    ModLog.Error("[PoliceTerminal] UI.Update failed: " + ex);
+                }
+
+                if (!EF.PoliceMod.Core.UIState.IsPoliceTerminalOpen)
+                {
+                    return;
+                }
+
+                try
+                {
+                    var player = Game.Player.Character;
+                    if (player != null && player.Exists())
+                    {
+                        Function.Call(Hash.FREEZE_ENTITY_POSITION, player.Handle, true);
+                        Function.Call(Hash.SET_PLAYER_CONTROL, Game.Player.Handle, false, 0);
+                    }
+                }
+                catch { }
             }
             else
             {
                 if (IsPlayerNearAnyTerminal() && CanOpenTerminal())
                 {
-                    // 使用自绘左上角提示（持续渲染、无音、不闪）
-                    DrawTopLeftPrompt("按 ~o~O~s~ 打开警用终端");
+                    // P0-1 Fix: Use dynamic key binding in prompt
+                    string keyName = EF.PoliceMod.Core.KeyBindings.GetKeyDisplayName(EF.PoliceMod.Core.KeyBindings.OpenTerminal);
+                    DrawTopLeftPrompt($"按 ~o~{keyName}~s~ 打开警用终端");
 #if DEBUG
                     if (!_wasPlayerNearTerminal) ModLog.Info("[PoliceTerminal] Top-left prompt shown (enter range)");
 #endif

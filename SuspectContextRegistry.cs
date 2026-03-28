@@ -1,4 +1,4 @@
-
+using EF.PoliceMod.Core;
 using System.Collections.Generic;
 
 namespace EF.PoliceMod.Suspects
@@ -40,6 +40,38 @@ namespace EF.PoliceMod.Suspects
             ctx = null;
             if (handle <= 0) return false;
             return _byHandle.TryGetValue(handle, out ctx);
+        }
+
+        public void SetArrestStyle(int handle, ArrestActionStyle style)
+        {
+            if (handle <= 0) return;
+            var ctx = GetOrCreate(handle);
+            if (ctx == null) return;
+            ctx.ArrestStyle = style;
+        }
+
+        public bool GetFollowRequested(int handle)
+        {
+            if (handle <= 0) return false;
+            if (!_byHandle.TryGetValue(handle, out var ctx) || ctx == null) return false;
+            return ctx.FollowRequested;
+        }
+
+        public void SetFollowRequested(int handle, bool requested)
+        {
+            if (handle <= 0) return;
+            var ctx = GetOrCreate(handle);
+            if (ctx == null) return;
+            ctx.FollowRequested = requested;
+        }
+
+        public void ClearFollowRequestedAll()
+        {
+            foreach (var pair in _byHandle)
+            {
+                if (pair.Value == null) continue;
+                pair.Value.FollowRequested = false;
+            }
         }
 
         public void Remove(int handle)

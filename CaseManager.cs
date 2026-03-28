@@ -21,7 +21,6 @@ namespace EF.PoliceMod
       
         private Ped _suspect;
         private Blip _suspectBlip;
-        private Blip _suspectSearchAreaBlip;
         private Vector3 _suspectLastKnownPos;
         private int _suspectLastKnownAtMs = 0;
         private bool _suspectLost = false;
@@ -46,9 +45,6 @@ namespace EF.PoliceMod
         // — StartDuty 会把它设为 true；交付后也会设为 true；开始案件后设为 false
         private bool _readyForNewCase = false;
         // 新增字段（类字段区）
-        private Blip _deliveryRouteBlip = null;
-        private int _lastRouteCreatedAt = 0;          // Game.GameTime ms
-        private int _lastRouteSuspectHandle = -1;
         private readonly Vector3 _policeStationPos = new Vector3(443.5f, -981.0f, 30.7f); // 如果想改成终端位置，后面我教你
                                                                                           // ---------- 挂起的 SuspectBoarded 事件队列（用于 case 尚未 active 时缓存） ----------
         private readonly System.Collections.Generic.Queue<EF.PoliceMod.Core.SuspectBoardedVehicleEvent> _pendingBoardedEvents
@@ -93,7 +89,7 @@ namespace EF.PoliceMod
             ModLog.Info("[CaseManager] Initialized");
         }
 
-        public new void Tick()
+        public void Tick()
         {
             OnTick();
         }
@@ -418,17 +414,6 @@ namespace EF.PoliceMod
 
             EndCase(EndReason.Completed);
             ClearDeliveryRoute();
-            // 取消并删除路由 blip（如果存在）
-            if (_deliveryRouteBlip != null)
-            {
-                try
-                {
-                    _deliveryRouteBlip.ShowRoute = false;
-                    _deliveryRouteBlip.Delete();
-                }
-                catch { }
-                _deliveryRouteBlip = null;
-            }
 
             // 交付后不自动生成新案件，需要玩家手动去终端接警
             _readyForNewCase = true;
@@ -738,59 +723,12 @@ namespace EF.PoliceMod
 
         private int CalculateScore(EndReason reason, int elapsedMs)
         {
-            if (elapsedMs > MaxCaseDurationMs)
-                return 0;
-            int baseScore = 0;
-
-            switch (reason)
-            {
-                case EndReason.Completed:
-                    baseScore = 10;   // ⭐ 成功交付是满分基准
-                    break;
-
-                case EndReason.SuspectDead:
-                    if (_suspectWasResisting)
-                        baseScore = 8;    // 合法击毙，低于活捉
-                    else
-                        baseScore = 2;    // 非授权击毙
-                    break;
-
-                case EndReason.Failed:
-                case EndReason.Timeout:
-                case EndReason.Cancelled:
-                    baseScore = 0;
-                    break;
-            }
-
-            float timeFactor = 1f - (float)elapsedMs / MaxCaseDurationMs;
-            if (timeFactor < 0.2f)
-                timeFactor = 0.2f;
-
-            return (int)(baseScore * timeFactor);
+            return EF.PoliceMod.Systems.CaseScoringService.CalculateScore(reason, elapsedMs, _suspectWasResisting);
         }
+
         private void ShowScore(EndReason reason, int score, int elapsedMs)
         {
-            int seconds = elapsedMs / 1000;
-            string reasonText = "任务结束";
-
-            switch (reason)
-            {
-                case EndReason.Completed:
-                    reasonText = "成功交付";
-                    break;
-                case EndReason.SuspectDead:
-                    reasonText = "嫌疑人死亡";
-                    break;
-                case EndReason.Timeout:
-                    reasonText = "任务超时";
-                    break;
-            }
-
-            Notification.Show(
-                "~y~案件结束：" + reasonText + "\n" +
-                "~w~用时：" + seconds + " 秒\n" +
-                "~g~评分：" + score + " / 10"
-            );
+            EF.PoliceMod.Systems.CaseScoringService.ShowScore(reason, score, elapsedMs);
         }
         public void OnDutyStarted(DutyStartedEvent e)
         {
@@ -1097,8 +1035,8 @@ namespace EF.PoliceMod
                 try
                 {
                     // 在世界里查找对应 handle，且必须不是玩家
-                    var found = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == requested && p.Handle != Game.Player.Handle);
-                    if (found != null && found.Exists())
+                    var found = Entity.FromHandle(requested) as Ped;
+                    if (found != null && found.Exists() && found.Handle != Game.Player.Handle)
                     {
                         resolvedHandle = found.Handle;
                         ModLog.Info($"[CaseManager] OnWantedSelected -> resolved existing ped handle={resolvedHandle}");
@@ -1122,71 +1060,41 @@ namespace EF.PoliceMod
             StartCase();
         }
 
+        // P1-1 Fix: Merged OnSuspectBoarded with ProcessSuspectBoardedEvent - removed duplicate logic
+        // OnSuspectBoarded now simply delegates to ProcessSuspectBoardedEvent
         private void OnSuspectBoarded(EF.PoliceMod.Core.SuspectBoardedVehicleEvent e)
         {
+            // P1-1 Fix: Validate case state before processing
+            if (!_caseActive)
+            {
+                // P1-1 Fix: If case is not active, queue the event for later processing
+                ModLog.Info("[CaseManager] SuspectBoarded received but case not active, queuing for later");
+                _pendingBoardedEvents.Enqueue(e);
+                return;
+            }
+
+            // P1-1 Fix: Validate suspect handle belongs to current case
+            if (!IsHandleInCurrentCase(e.SuspectHandle))
+            {
+                ModLog.Info($"[CaseManager] SuspectBoarded ignored: handle {e.SuspectHandle} not in current case");
+                return;
+            }
+
+            // P1-1 Fix: Validate suspect entity exists
+            Ped suspect = null;
             try
             {
-                int suspectHandle = e.SuspectHandle;
-                Ped suspect = null;
-                if (suspectHandle > 0)
-                {
-                    try
-                    {
-       
-                        try
-                        {
-                            var found = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == suspectHandle);
-                            if (found != null && found.Exists()) suspect = found;
-                            else suspect = null;
-                        }
-                        catch
-                        {
-                            suspect = null;
-                        }
-
-                    }
-                    catch { suspect = null; }
-                }
-
-                // 删除旧 blip
-                if (_deliveryRouteBlip != null)
-                {
-                    try { _deliveryRouteBlip.ShowRoute = false; _deliveryRouteBlip.Delete(); } catch { }
-                    _deliveryRouteBlip = null;
-                }
-
-                // 创建新 blip 并尝试显示路线
-                _deliveryRouteBlip = World.CreateBlip(_policeStationPos);
-                _deliveryRouteBlip.Sprite = BlipSprite.PoliceStation;
-                _deliveryRouteBlip.Color = BlipColor.Blue;
-                _deliveryRouteBlip.IsShortRange = false;
-                _deliveryRouteBlip.Name = "交付地点：警局";
-
-                bool routeSet = false;
-                try
-                {
-                    _deliveryRouteBlip.ShowRoute = true;
-                    routeSet = true;
-                }
-                catch { }
-
-                // 兜底 waypoint
-                try
-                {
-                    Function.Call(Hash.SET_NEW_WAYPOINT, _policeStationPos.X, _policeStationPos.Y);
-                }
-                catch { }
-
-                _lastRouteCreatedAt = Game.GameTime;
-                _lastRouteSuspectHandle = suspectHandle;
-
-                SmsNotification.Show("911调度", "押送指令", "嫌疑人已上车，导航已设置：返回警局交付");
-                ModLog.Info("[CaseManager] Delivery route set (suspect=" + suspectHandle + ")");
+                suspect = Entity.FromHandle(e.SuspectHandle) as Ped;
             }
-            catch (Exception ex)
+            catch { }
+            
+            if (suspect == null || !suspect.Exists())
             {
-                ModLog.Error("[CaseManager] OnSuspectBoarded error: " + ex);
+                ModLog.Warn($"[CaseManager] SuspectBoarded ignored: suspect entity invalid for handle {e.SuspectHandle}");
+                return;
             }
+
+            ProcessSuspectBoardedEvent(e);
         }
 
 
@@ -1220,83 +1128,13 @@ namespace EF.PoliceMod
         // 取消导航（公用）
         private void ClearDeliveryRoute()
         {
-            // 删除 route blip
-            if (_deliveryRouteBlip != null)
-            {
-                try { _deliveryRouteBlip.ShowRoute = false; _deliveryRouteBlip.Delete(); } catch { }
-                _deliveryRouteBlip = null;
-            }
-
-            // 清除 waypoint（导航残留的根源）
-            try { Function.Call(Hash.SET_WAYPOINT_OFF); } catch { }
-            try { Function.Call(Hash.CLEAR_GPS_PLAYER_WAYPOINT); } catch { }
+            EF.PoliceMod.Systems.CaseNavigationService.ClearDeliveryRoute();
         }
         // 处理实际的 boarded 事件（创建路由，兜底 waypoint，防抖已在 OnSuspectBoarded 中处理）
         private void ProcessSuspectBoardedEvent(EF.PoliceMod.Core.SuspectBoardedVehicleEvent e)
         {
-            try
-            {
-                int now = Game.GameTime;
-                int suspectHandle = (e.SuspectHandle > 0) ? e.SuspectHandle : -1;
-
-                // （如果你后面还需要 Ped 实例，可按需解析：）
-                // Ped suspect = null;
-                // if (suspectHandle > 0) {
-                //     try {
-                //         suspect = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == suspectHandle);
-                //     } catch { suspect = null; }
-                // }
-
-
-                // 删除旧 blip（如果有）
-                if (_deliveryRouteBlip != null)
-                {
-                    try { _deliveryRouteBlip.ShowRoute = false; _deliveryRouteBlip.Delete(); } catch { }
-                    _deliveryRouteBlip = null;
-                }
-
-                ModLog.Info("[CaseManager] Processing SuspectBoarded -> creating delivery route to station (suspect=" + suspectHandle + ")");
-
-                // 创建目标 blip
-                _deliveryRouteBlip = World.CreateBlip(_policeStationPos);
-                _deliveryRouteBlip.Sprite = BlipSprite.PoliceStation;
-                _deliveryRouteBlip.Color = BlipColor.Blue;
-                _deliveryRouteBlip.IsShortRange = false;
-                _deliveryRouteBlip.Name = "交付地点：警局";
-
-                bool routeSet = false;
-                try
-                {
-                    _deliveryRouteBlip.ShowRoute = true;
-                    routeSet = true;
-                    ModLog.Info("[CaseManager] Delivery blip created and ShowRoute=true");
-                }
-                catch (Exception ex)
-                {
-                    ModLog.Warn("[CaseManager] ShowRoute failed: " + ex);
-                }
-
-                // 兜底 waypoint
-                try
-                {
-                    Function.Call(Hash.SET_NEW_WAYPOINT, _policeStationPos.X, _policeStationPos.Y);
-                    if (!routeSet) ModLog.Info("[CaseManager] Fallback: SET_NEW_WAYPOINT called");
-                }
-                catch (Exception ex)
-                {
-                    ModLog.Warn("[CaseManager] SET_NEW_WAYPOINT failed: " + ex);
-                }
-
-                // 记录时间/handle（如果你有防抖字段）
-                _lastRouteCreatedAt = Game.GameTime;
-                _lastRouteSuspectHandle = suspectHandle;
-
-                SmsNotification.Show("911调度", "押送指令", "嫌疑人已上车，导航已设置：返回警局交付");
-            }
-            catch (Exception ex)
-            {
-                ModLog.Error("[CaseManager] ProcessSuspectBoardedEvent error: " + ex);
-            }
+            int suspectHandle = (e.SuspectHandle > 0) ? e.SuspectHandle : -1;
+            EF.PoliceMod.Systems.CaseNavigationService.SetDeliveryRoute(suspectHandle);
         }
 
         private void SpawnSuspect(SuspectProfile profile)
@@ -1518,19 +1356,6 @@ namespace EF.PoliceMod
             _suspect.IsPersistent = true;
             _suspect.BlockPermanentEvents = true;
 
-            // 新案生成保护期：避免刚开局就因距离判定进入 LOST（导致必须立刻直升机勘探）
-            _suspectRecoverAtMs = Game.GameTime + 45000;
-
-            // 新案生成保护期：避免刚开局就因距离判定进入 LOST（导致必须立刻直升机勘探）
-            _suspectRecoverAtMs = Game.GameTime + 45000;
-
-            // 新案生成保护期：避免刚开局就因距离判定进入 LOST（导致必须立刻直升机勘探）
-            _suspectRecoverAtMs = Game.GameTime + 45000;
-
-            // 新案生成保护期：避免刚开局就因距离判定进入 LOST（导致必须立刻直升机勘探）
-            _suspectRecoverAtMs = Game.GameTime + 45000;
-
-            // 新案生成保护期：避免刚开局就因距离判定进入 LOST（导致必须立刻直升机勘探）
             _suspectRecoverAtMs = Game.GameTime + 45000;
 
             Vehicle caseVehicle = null;
@@ -1650,11 +1475,7 @@ namespace EF.PoliceMod
 
         private void ClearSuspectSearchArea()
         {
-            if (_suspectSearchAreaBlip != null)
-            {
-                try { if (_suspectSearchAreaBlip.Exists()) _suspectSearchAreaBlip.Delete(); } catch { }
-            }
-            _suspectSearchAreaBlip = null;
+            EF.PoliceMod.Systems.CaseSearchAreaService.ClearSearchArea();
             _suspectLost = false;
         }
         public void MarkSuspectFound(Ped suspect, Vector3 pos)
@@ -1713,11 +1534,7 @@ namespace EF.PoliceMod
             {
                 // 半径可后续按星级/风险调整
                 float radius = 140f;
-                _suspectSearchAreaBlip = World.CreateBlip(_suspectLastKnownPos, radius);
-                _suspectSearchAreaBlip.Color = BlipColor.Red;
-                _suspectSearchAreaBlip.Alpha = 80;
-                _suspectSearchAreaBlip.IsShortRange = false;
-                _suspectSearchAreaBlip.Name = "嫌疑人可能位置";
+                EF.PoliceMod.Systems.CaseSearchAreaService.CreateSearchArea(_suspectLastKnownPos, radius);
             }
             catch { }
 
@@ -1740,7 +1557,7 @@ namespace EF.PoliceMod
 
                 // 找到 ped
                 Ped s2 = null;
-                try { s2 = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == handle2); } catch { s2 = null; }
+                try { s2 = Entity.FromHandle(handle2) as Ped; } catch { s2 = null; }
                 if (s2 == null || !s2.Exists()) return;
                 if (s2.IsDead)
                 {
@@ -1791,7 +1608,7 @@ namespace EF.PoliceMod
                 if (nextHandle <= 0) return false;
 
                 Ped nextPed = null;
-                try { nextPed = World.GetAllPeds().FirstOrDefault(p => p != null && p.Exists() && p.Handle == nextHandle); } catch { nextPed = null; }
+                try { nextPed = Entity.FromHandle(nextHandle) as Ped; } catch { nextPed = null; }
                 if (nextPed == null || !nextPed.Exists() || nextPed.IsDead) return false;
 
                 // 提升为 primary
@@ -1853,6 +1670,9 @@ namespace EF.PoliceMod
                 // 广播列表变更（有系统想更新 UI 时用）
                 try { EventBus.Publish(new EF.PoliceMod.Core.SuspectHandleListChangedEvent(_suspectHandles)); } catch { }
 
+                // 广播案件状态变更，让 CaseStatusQuery 等系统刷新对"当前目标"的认知
+                PublishCaseStatusIfChanged();
+
                 ModLog.Info("[CaseManager] Switched primary suspect to index=1 due to " + reason);
                 return true;
             }
@@ -1898,11 +1718,27 @@ namespace EF.PoliceMod
         {
             try
             {
-                var hub = EFCore.Instance?.GetSuspectStateHub();
-                if (hub != null && !hub.Is(SuspectState.None))
+                var mainHub = EFCore.Instance?.GetSuspectStateHub();
+                if (mainHub != null && !mainHub.Is(SuspectState.None))
                 {
-                    hub.ChangeState(SuspectState.None);
-                    ModLog.Info("[CaseManager] Reset suspect state hub to None (" + reason + ")");
+                    mainHub.ChangeState(SuspectState.None);
+                    ModLog.Info("[CaseManager] Reset primary suspect state hub to None (" + reason + ")");
+                }
+
+                if (_suspectHandles != null)
+                {
+                    foreach (var h in _suspectHandles)
+                    {
+                        if (h > 0)
+                        {
+                            var hub = EFCore.Instance?.StateHubRouter?.GetHubFor(h);
+                            if (hub != null && !hub.Is(SuspectState.None))
+                            {
+                                hub.ChangeState(SuspectState.None);
+                                ModLog.Info($"[CaseManager] Reset suspect {h} state hub to None ({reason})");
+                            }
+                        }
+                    }
                 }
             }
             catch (Exception ex)

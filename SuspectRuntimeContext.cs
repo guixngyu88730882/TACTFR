@@ -32,12 +32,29 @@ namespace EF.PoliceMod.Suspects
         public bool Busy { get; set; } = false;
 
         public int LastCommandAtMs { get; set; } = 0;
+        public int ReservedVehicleHandle { get; set; } = 0;
+        public VehicleSeat ReservedSeat { get; set; } = VehicleSeat.None;
+        public int ReservedDoorIndex { get; set; } = -1;
+        public int BoardingSequence { get; set; } = 0;
+        public int BoardingAttemptCount { get; set; } = 0;
+        public int NextBoardingRetryAtMs { get; set; } = 0;
 
         public SuspectRuntimeContext(int handle)
         {
             Handle = handle;
             // Step4b：每个嫌疑人上下文持有自己的 StateHub（记录句柄归属）
             StateHub = new SuspectStateHub(handle);
+        }
+
+        public void ResetBoardingReservation()
+        {
+            ReservedVehicleHandle = 0;
+            ReservedSeat = VehicleSeat.None;
+            ReservedDoorIndex = -1;
+            BoardingSequence = 0;
+            BoardingAttemptCount = 0;
+            NextBoardingRetryAtMs = 0;
+            LastCommandAtMs = 0;
         }
 
 

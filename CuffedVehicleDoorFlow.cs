@@ -80,6 +80,7 @@ namespace EF.PoliceMod.Executors
             // 超时兜底：避免永远残留 pending
             if (_pendingShutDoorExpireAtMs != 0 && nowMs >= _pendingShutDoorExpireAtMs)
             {
+                ModLog.Info($"[Door] Pending shut-door expired (vehicle={_pendingShutDoorVehicleHandle}, door={_pendingShutDoorIndex}, suspect={_pendingShutDoorSuspectHandle})");
                 _pendingShutDoorVehicleHandle = 0;
                 _pendingShutDoorIndex = -1;
                 _pendingShutDoorAtMs = 0;

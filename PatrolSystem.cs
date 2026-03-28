@@ -40,8 +40,19 @@ namespace EF.PoliceMod.Systems
             ModLog.Info("[PatrolSystem] Initialized");
         }
 
-        public new void Tick()
+        private int _searchEndTime = 0;
+        private bool _isSearching = false;
+        private Ped _searchTarget = null;
+        private bool _playerControlLocked = false;
+        private bool _playerFrozen = false;
+        private bool _targetFrozen = false;
+
+        public void Tick()
         {
+            if (_isSearching && Game.GameTime > _searchEndTime)
+            {
+                EndSearchAnimation();
+            }
         }
 
         public void Shutdown()
@@ -141,24 +152,53 @@ namespace EF.PoliceMod.Systems
             PlaySearchAnimation(target);
 
             int roll = new Random(Game.GameTime + target.Handle * 13).Next(100);
-            if (roll < 75)
+            if (roll < 40) // 75 -> 40
             {
                 SmsNotification.Show("警务终端", "搜查", "搜查结果：未发现违禁品。");
                 _checksCompleted++;
                 return;
             }
-            if (roll < 92)
+            if (roll < 70) // 92 -> 70
             {
-                SmsNotification.Show("警务终端", "搜查", "~o~发现违禁品~s~：对方可能会逃跑或反抗！");
+                SmsNotification.Show("警务终端", "搜查", "~o~发现违禁品~s~：对方试图逃跑！");
                 try { EventBus.Publish(new PatrolContrabandFoundEvent(target, false)); } catch { }
                 try { EventBus.Publish(new PatrolSuspectFleeEvent(target, Game.Player.Character)); } catch { }
                 _checksCompleted++;
                 return;
             }
 
-            SmsNotification.Show("警务终端", "搜查", "~r~发现携带武器~s~：对方反抗！");
+            SmsNotification.Show("警务终端", "搜查", "~r~发现携带武器~s~：对方拔枪反抗！");
             try { EventBus.Publish(new PatrolContrabandFoundEvent(target, true)); } catch { }
             try { EventBus.Publish(new PatrolSuspectResistEvent(target, Game.Player.Character)); } catch { }
+            _checksCompleted++;
+        }
+
+        public void RequestBreathalyzer()
+        {
+            if (!_enabled) { Notification.Show("~y~巡逻模式未开启"); return; }
+            if (!Debounce()) return;
+
+            var target = ResolveTarget();
+            if (target == null || !target.Exists()) { Notification.Show("~y~请先用 L 锁定目标"); return; }
+
+            int roll = new Random(Game.GameTime + target.Handle * 17).Next(100);
+            if (roll < 80)
+            {
+                SmsNotification.Show("警务终端", "酒精测试", "测试结果：~g~阴性（未饮酒/吸毒）~s~。");
+            }
+            else
+            {
+                SmsNotification.Show("警务终端", "酒精测试", "测试结果：~r~阳性（酒驾/毒驾）~s~。可以实施逮捕！");
+                if (roll > 90)
+                {
+                    try { EventBus.Publish(new PatrolSuspectFleeEvent(target, Game.Player.Character)); } catch { }
+                }
+                else if (roll > 85)
+                {
+                    try { EventBus.Publish(new PatrolSuspectResistEvent(target, Game.Player.Character)); } catch { }
+                }
+            }
+
             _checksCompleted++;
         }
 
@@ -169,33 +209,28 @@ namespace EF.PoliceMod.Systems
                 var player = Game.Player.Character;
                 if (player == null || !player.Exists()) return;
 
-                bool playerControlLocked = false;
-                bool playerFrozen = false;
-                bool targetFrozen = false;
+                _playerControlLocked = false;
+                _playerFrozen = false;
+                _targetFrozen = false;
 
-                Function.Call(Hash.REQUEST_ANIM_DICT, "missfbi5ig_22");
-                Function.Call(Hash.REQUEST_ANIM_DICT, "random@arrests");
+                // 升级为更电影级别/平缓的搜身动画
+                string dict = "missexile3";
+                string anim = "ex03_dingy_search_b_michael";
 
-                int timeout = 0;
-                while (!Function.Call<bool>(Hash.HAS_ANIM_DICT_LOADED, "missfbi5ig_22") && timeout < 50)
+                // Function.Call(Hash.REQUEST_ANIM_DICT, dict);
+                // SHVDN handles dictionary loading in Task.PlayAnimation
+
+                try
                 {
-                    GTA.Script.Wait(10);
-                    timeout++;
-                }
+                    try { Function.Call(Hash.SET_PLAYER_CONTROL, Game.Player.Handle, false, 0); _playerControlLocked = true; } catch { }
+                    try { Function.Call(Hash.FREEZE_ENTITY_POSITION, player.Handle, true); _playerFrozen = true; } catch { }
+                    try { if (target != null && target.Exists()) { Function.Call(Hash.FREEZE_ENTITY_POSITION, target.Handle, true); _targetFrozen = true; } } catch { }
 
-                if (Function.Call<bool>(Hash.HAS_ANIM_DICT_LOADED, "missfbi5ig_22"))
-                {
-                    try
-                    {
-                        try { Function.Call(Hash.SET_PLAYER_CONTROL, Game.Player.Handle, false, 0); playerControlLocked = true; } catch { }
-                        try { Function.Call(Hash.FREEZE_ENTITY_POSITION, player.Handle, true); playerFrozen = true; } catch { }
-                        try { if (target != null && target.Exists()) { Function.Call(Hash.FREEZE_ENTITY_POSITION, target.Handle, true); targetFrozen = true; } } catch { }
-
-                        player.Task.ClearAll();
-                        player.Task.PlayAnimation("missfbi5ig_22", "fbi_5ig_22_pistol_whip_ped", 8.0f, -1, AnimationFlags.StayInEndFrame);
-                    }
-                    catch { }
+                    player.Task.ClearAll();
+                    // 播放搜查动画
+                    player.Task.PlayAnimation(dict, anim, 8.0f, -1, AnimationFlags.StayInEndFrame);
                 }
+                catch { }
 
                 if (target != null && target.Exists())
                 {
@@ -208,24 +243,33 @@ namespace EF.PoliceMod.Systems
                     catch { }
                 }
 
-                GTA.Script.Wait(2000);
+                _isSearching = true;
+                _searchTarget = target;
+                _searchEndTime = Game.GameTime + 3000;
 
-                try
-                {
-                    player.Task.ClearAll();
-                }
-                catch { }
-
-                try { if (targetFrozen && target != null && target.Exists()) Function.Call(Hash.FREEZE_ENTITY_POSITION, target.Handle, false); } catch { }
-                try { if (playerFrozen) Function.Call(Hash.FREEZE_ENTITY_POSITION, player.Handle, false); } catch { }
-                try { if (playerControlLocked) Function.Call(Hash.SET_PLAYER_CONTROL, Game.Player.Handle, true, 0); } catch { }
-
-                ModLog.Info("[PatrolSystem] Search animation played");
+                ModLog.Info("[PatrolSystem] Cinematic Search animation started");
             }
             catch (Exception ex)
             {
                 ModLog.Error("[PatrolSystem] Search animation failed: " + ex);
             }
+        }
+
+        private void EndSearchAnimation()
+        {
+            _isSearching = false;
+            var player = Game.Player.Character;
+            if (player != null && player.Exists())
+            {
+                try { player.Task.ClearAll(); } catch { }
+            }
+
+            try { if (_targetFrozen && _searchTarget != null && _searchTarget.Exists()) Function.Call(Hash.FREEZE_ENTITY_POSITION, _searchTarget.Handle, false); } catch { }
+            try { if (_playerFrozen && player != null && player.Exists()) Function.Call(Hash.FREEZE_ENTITY_POSITION, player.Handle, false); } catch { }
+            try { if (_playerControlLocked) Function.Call(Hash.SET_PLAYER_CONTROL, Game.Player.Handle, true, 0); } catch { }
+            
+            _searchTarget = null;
+            ModLog.Info("[PatrolSystem] Cinematic Search animation ended");
         }
 
         private Ped ResolveTarget()
