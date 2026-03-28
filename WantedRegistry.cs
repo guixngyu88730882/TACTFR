@@ -1,17 +1,87 @@
+using System;
 using System.Collections.Generic;
+using System.Linq;
 using EF.PoliceMod.Data;
 using EF.PoliceMod.Core;
 using GTA;
 
 namespace EF.PoliceMod.Data
 {
-    
-
-    // 轻量“通缉对象提供器”。CaseManager 会把当前嫌疑人注册到 LockTargetSystem，
-    // 我们这里从 LockTargetSystem / CaseManager 拉数据（如果没有就返回示例数据）。
+    // P1-3 Fix: WantedRegistry now provides data-driven case list for PoliceTerminalUI
+    // TODO: Implement RefreshFromWorld() to fetch real wanted data from game world
     public class WantedRegistry
     {
-        // TODO: 如果你有中心化的“通缉列表”可以直接从那里填充
+        private List<WantedRecord> _cachedCases = new List<WantedRecord>();
+        private int _lastRefreshAtMs = 0;
+        private const int REFRESH_INTERVAL_MS = 30000; // Refresh every 30 seconds
+
+        // P1-3 Fix: New method to get available cases for terminal UI
+        public List<TerminalCaseData> GetAvailableCases(bool dualMode)
+        {
+            // Return cached cases if available and not stale
+            if (_cachedCases.Count > 0 && Game.GameTime - _lastRefreshAtMs < REFRESH_INTERVAL_MS)
+            {
+                return ConvertToTerminalCases(_cachedCases, dualMode);
+            }
+
+            // Try to get real data from CaseManager/LockTargetSystem
+            RefreshFromWorld();
+            
+            if (_cachedCases.Count > 0)
+            {
+                return ConvertToTerminalCases(_cachedCases, dualMode);
+            }
+
+            // Return empty list to trigger fallback in PoliceTerminalUI
+            return new List<TerminalCaseData>();
+        }
+
+        // P1-3 Fix: Convert WantedRecord to TerminalCaseData
+        private List<TerminalCaseData> ConvertToTerminalCases(List<WantedRecord> records, bool dualMode)
+        {
+            var result = new List<TerminalCaseData>();
+            var rnd = new System.Random();
+            int modeOffset = dualMode ? 10 : 0;
+            string modeText = dualMode ? "双人" : "单人";
+
+            for (int i = 0; i < records.Count; i++)
+            {
+                var rec = records[i];
+                bool isVehicle = (i % 2 == 1);
+                string typeName = isVehicle ? "驾车逃逸" : "步行嫌疑人";
+                string reason = isVehicle ? "追车" : "接警";
+                string loc = string.IsNullOrEmpty(rec.Location) ? (string.IsNullOrEmpty(rec.LastSeen) ? "未知" : rec.LastSeen) : rec.Location;
+
+                int stars = rec.Stars;
+                if (dualMode)
+                {
+                    stars = isVehicle ? 5 : Math.Max(4, stars);
+                }
+
+                string suspectName = rec.DisplayName ?? "未知";
+                if (dualMode)
+                {
+                    var other = records[rnd.Next(records.Count)];
+                    suspectName = suspectName + " & " + (other.DisplayName ?? "未知");
+                }
+
+                result.Add(new TerminalCaseData
+                {
+                    OptionId = i + modeOffset,
+                    DisplayName = $"{loc} · {typeName} · {modeText}",
+                    Stars = stars,
+                    LastSeen = rec.LastSeen ?? "-",
+                    Reason = reason,
+                    SuspectName = suspectName,
+                    Crime = rec.Crime ?? rec.Reason ?? "-",
+                    Location = loc
+                });
+            }
+
+            return result;
+        }
+
+        // TODO: 如果你有中心化的"通缉列表"可以直接从那里填充
         public IEnumerable<WantedRecord> GetActiveList()
         {
             var list = new List<WantedRecord>();
@@ -22,12 +92,8 @@ namespace EF.PoliceMod.Data
                 var cm = EFCore.Instance?.GetCaseManager();
                 if (cm != null)
                 {
-                    // 如果有公开方法 GetCurrentSuspect()，优先使用真实数据
-                    var getSuspectMethod = cm.GetType().GetMethod("GetCurrentSuspect", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
-                    if (getSuspectMethod != null)
-                    {
-                        var suspect = getSuspectMethod.Invoke(cm, null) as GTA.Ped;
-                        if (suspect != null && suspect.Exists())
+                    var suspect = cm.GetCurrentSuspectPed();
+                    if (suspect != null && suspect.Exists())
                         {
                             list.Add(new WantedRecord
                             {
@@ -39,11 +105,9 @@ namespace EF.PoliceMod.Data
                             });
                             return list;
                         }
-                    }
 
                     // 如果 CaseManager 报告有活动案件但没有具体 Ped，展示简洁提示
-                    var hasActiveProp = cm.GetType().GetProperty("HasActiveCase", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public);
-                    if (hasActiveProp != null && (bool)hasActiveProp.GetValue(cm))
+                    if (cm.HasActiveCase)
                     {
                         list.Add(new WantedRecord
                         {
@@ -110,10 +174,105 @@ namespace EF.PoliceMod.Data
             return list;
         }
 
+        // P1-3 Fix: Implemented RefreshFromWorld to populate cached cases
         public void RefreshFromWorld()
         {
-            // TODO: optional: 如果你能从 CaseManager/LockTargetSystem 获取动态数据，
-            // 在这里把内部缓存更新为真实世界数据。
+            _cachedCases.Clear();
+
+            try
+            {
+                // Try to get data from CaseManager
+                var cm = EFCore.Instance?.GetCaseManager();
+                if (cm != null && cm.HasActiveCase)
+                {
+                    // Get current suspect if available
+                    var handles = cm.SuspectHandles;
+                    if (handles != null && handles.Count > 0)
+                    {
+                        foreach (var handle in handles)
+                        {
+                            if (handle <= 0) continue;
+
+                            Ped ped = null;
+                            try { ped = Entity.FromHandle(handle) as Ped; } catch { }
+
+                            if (ped != null && ped.Exists())
+                            {
+                                _cachedCases.Add(new WantedRecord
+                                {
+                                    PedHandle = handle,
+                                    DisplayName = "嫌疑人",
+                                    Stars = 0,
+                                    LastSeen = "当前位置",
+                                    Reason = "正在处理"
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // If no active cases, generate random preview cases
+                if (_cachedCases.Count == 0)
+                {
+                    GenerateRandomCases();
+                }
+            }
+            catch (Exception ex)
+            {
+                ModLog.Error("[WantedRegistry] RefreshFromWorld error: " + ex);
+                GenerateRandomCases();
+            }
+
+            _lastRefreshAtMs = Game.GameTime;
         }
+
+        // P1-3 Fix: Generate random preview cases when no real data available
+        private void GenerateRandomCases()
+        {
+            var names = new[] { "汤米", "尼克", "杰克", "迈卡", "亚瑟", "唐纳德", "陈勇", "维克托", "弗兰克", "萨尔" };
+            var crimesOnFoot = new[] { "盗窃", "斗殴", "扰乱治安", "非法入侵", "持械抢劫", "袭击", "破坏公共财产" };
+            var crimesVehicle = new[] { "拒检逃逸", "危险驾驶", "肇事逃逸", "飙车", "酒驾" };
+            var locations = new[] { "市区", "郊区", "偏远" };
+
+            var rnd = new System.Random();
+
+            for (int locIdx = 0; locIdx < locations.Length; locIdx++)
+            {
+                _cachedCases.Add(new WantedRecord
+                {
+                    PedHandle = -1,
+                    DisplayName = names[rnd.Next(names.Length)],
+                    Stars = rnd.Next(1, 5),
+                    LastSeen = locations[locIdx],
+                    Reason = crimesOnFoot[rnd.Next(crimesOnFoot.Length)],
+                    Crime = crimesOnFoot[rnd.Next(crimesOnFoot.Length)],
+                    Location = locations[locIdx]
+                });
+
+                _cachedCases.Add(new WantedRecord
+                {
+                    PedHandle = -1,
+                    DisplayName = names[rnd.Next(names.Length)],
+                    Stars = Math.Max(2, rnd.Next(1, 6)),
+                    LastSeen = locations[locIdx],
+                    Reason = crimesVehicle[rnd.Next(crimesVehicle.Length)],
+                    Crime = crimesVehicle[rnd.Next(crimesVehicle.Length)],
+                    Location = locations[locIdx]
+                });
+            }
+        }
+    }
+
+    // P1-3 Fix: New data class for terminal UI case data
+    public class TerminalCaseData
+    {
+        public int OptionId { get; set; }
+        public string DisplayName { get; set; }
+        public int Stars { get; set; }
+        public string LastSeen { get; set; }
+        public string Reason { get; set; }
+        public string SuspectName { get; set; }
+        public string Crime { get; set; }
+        public string Location { get; set; }
     }
 }
